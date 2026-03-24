@@ -1,36 +1,36 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { StreamsList } from "./components/sidebar/StreamsList";
 import { StreamsDrawer } from "./components/mobile/StreamsDrawer";
 import { PlayPauseButton } from "./components/player/PlayPauseButton";
 import { NowPlaying } from "./components/player/NowPlaying";
 import { ArtistDrawer } from "./components/drawers/ArtistDrawer";
 import { InfoDialog } from "./components/dialogs/InfoDialog";
+import { BusMysteryCard } from "./components/BusMysteryCard";
 import { getMetaFor } from "./utils/streamMeta";
 import { fmtTime } from "./utils/formatters";
 
-
 export default function App() {
-  // ─── Core state ──────────────────────────────────────────────────────────────
+  // ─── Core state (Browse & Switch model) ────────────────────────────────────
   const [streams, setStreams] = useState([]);
-  const [activeId, setActiveId] = useState(null);
-  const [now, setNow] = useState(null);
+  const [viewingStreamId, setViewingStreamId] = useState(null);   // what you SEE
+  const [playingStreamId, setPlayingStreamId] = useState(null);   // what you HEAR
+  const [now, setNow] = useState(null);           // metadata for VIEWING stream
+  const [playingNow, setPlayingNow] = useState(null); // metadata for PLAYING stream
   const [artistCard, setArtistCard] = useState(null);
   const [loadingStreams, setLoadingStreams] = useState(true);
   const [err, setErr] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [mobileStreamsOpen, setMobileStreamsOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [busCardOpen, setBusCardOpen] = useState(false);
 
-  // Which stream is truly playing (can differ from activeId while browsing)
-  const [playingStreamId, setPlayingStreamId] = useState(null);
-  // The stream id that matches the current audio.src
   const audioStreamIdRef = useRef(null);
 
   // ─── Audio + player state ────────────────────────────────────────────────────
   const audioRef = useRef(null);
-  const [player, setPlayer] = useState({ status: "idle", msg: "" }); // idle | loading | playing | paused | error
+  const [player, setPlayer] = useState({ status: "idle", msg: "" });
 
-  // Volume (local only)
+  // Volume
   const [vol, setVol] = useState(() => {
     const saved = Number(localStorage.getItem("playerVolPct") || 85);
     return Number.isFinite(saved) ? Math.max(0, Math.min(100, saved)) : 85;
@@ -60,24 +60,37 @@ export default function App() {
         setStreams(data);
         const last = localStorage.getItem("activeStreamId");
         const def = data.find((s) => s.id === last) || data[0];
-        if (def) setActiveId(def.id);
+        if (def) setViewingStreamId(def.id);
       } catch {
         setErr("Unable to load streams");
       } finally {
         setLoadingStreams(false);
       }
     })();
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, []);
 
-  const activeStream = useMemo(
-    () => streams.find((s) => s.id === activeId) || null,
-    [streams, activeId]
+  // Sorted stream IDs for navigation
+  const streamOrder = useMemo(() => {
+    const order = {
+      "gaende-favorites": 0, "ambiance-safe": 1, "bermuda-day": 2, "bermuda-night": 3,
+      "palac-slow-hypno": 4, "palac-dance": 5, "fontanna-laputa": 6, "etage-0": 7, "closing": 8, "bus": 9,
+    };
+    return [...streams].sort((a, b) => (order[a.id] ?? 999) - (order[b.id] ?? 999)).map(s => s.id);
+  }, [streams]);
+
+  const viewingStream = useMemo(
+    () => streams.find((s) => s.id === viewingStreamId) || null,
+    [streams, viewingStreamId]
+  );
+  const playingStream = useMemo(
+    () => streams.find((s) => s.id === playingStreamId) || null,
+    [streams, playingStreamId]
   );
 
-  // Preconnect to stream origins for faster start
+  const isExploring = viewingStreamId && playingStreamId && viewingStreamId !== playingStreamId;
+
+  // Preconnect to stream origins
   useEffect(() => {
     if (!streams.length) return;
     const created = [];
@@ -97,17 +110,15 @@ export default function App() {
     return () => created.forEach((el) => el.remove());
   }, [streams]);
 
-  // ─── Poll now-playing with backoff ──────────────────────────────────────────
+  // ─── Poll now-playing for VIEWING stream ──────────────────────────────────────
   const pollRef = useRef({ timer: null, delay: 5000 });
   useEffect(() => {
-    if (!activeStream) return;
+    if (!viewingStream) return;
     let alive = true;
 
     async function fetchNow() {
       try {
-        const r = await fetch(`/api/streams/${activeStream.id}/now`, {
-          cache: "no-store",
-        });
+        const r = await fetch(`/api/streams/${viewingStream.id}/now`, { cache: "no-store" });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         if (!alive) return;
@@ -115,14 +126,15 @@ export default function App() {
         setArtistCard(data.artist || null);
         setErr("");
         pollRef.current.delay = 5000;
-        updateMediaSession(data);
+        // Only update media session if this is the playing stream
+        if (viewingStream.id === playingStreamId) {
+          updateMediaSession(data);
+          setPlayingNow(data.now);
+        }
       } catch {
         if (!alive) return;
         setErr("Connection lost. Retrying…");
-        pollRef.current.delay = Math.min(
-          20000,
-          Math.round((pollRef.current.delay || 5000) * 1.5)
-        );
+        pollRef.current.delay = Math.min(20000, Math.round((pollRef.current.delay || 5000) * 1.5));
       } finally {
         schedule();
       }
@@ -135,29 +147,45 @@ export default function App() {
     }
 
     fetchNow();
-    return () => {
-      alive = false;
-      clearTimeout(pollRef.current.timer);
-    };
-  }, [activeStream]);
+    return () => { alive = false; clearTimeout(pollRef.current.timer); };
+  }, [viewingStream, playingStreamId]);
 
-  // ─── Audio events → resilient player state ───────────────────────────────────
+  // ─── Poll now-playing for PLAYING stream (when exploring a different one) ────
+  const playingPollRef = useRef({ timer: null, delay: 5000 });
+  useEffect(() => {
+    if (!playingStreamId || !isExploring) return;
+    let alive = true;
+
+    async function fetchPlayingNow() {
+      try {
+        const r = await fetch(`/api/streams/${playingStreamId}/now`, { cache: "no-store" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (!alive) return;
+        setPlayingNow(data.now);
+        updateMediaSession(data);
+      } catch {
+        // silently retry
+      } finally {
+        clearTimeout(playingPollRef.current.timer);
+        playingPollRef.current.timer = setTimeout(fetchPlayingNow, 5000);
+      }
+    }
+
+    fetchPlayingNow();
+    return () => { alive = false; clearTimeout(playingPollRef.current.timer); };
+  }, [playingStreamId, isExploring]);
+
+  // ─── Audio events → resilient player state ─────────────────────────────────
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
     let waitingTimer = null;
-    const clearWaiting = () => {
-      if (waitingTimer) {
-        clearTimeout(waitingTimer);
-        waitingTimer = null;
-      }
-    };
+    const clearWaiting = () => { if (waitingTimer) { clearTimeout(waitingTimer); waitingTimer = null; } };
     const showLoading = (msg) => {
       clearWaiting();
-      waitingTimer = setTimeout(() => {
-        if (!a.paused) setPlayer({ status: "loading", msg });
-      }, 150);
+      waitingTimer = setTimeout(() => { if (!a.paused) setPlayer({ status: "loading", msg }); }, 150);
     };
     const setPlaying = () => {
       clearWaiting();
@@ -167,111 +195,59 @@ export default function App() {
     const setPaused = (m = "") => {
       clearWaiting();
       setPlayer({ status: "paused", msg: m });
-      setPlayingStreamId(null);
     };
 
     const onLoadStart = () => showLoading("Connecting…");
-    const onPlay = () => {
-      if (!a.paused && (a.currentTime > 0 || a.readyState >= 2)) setPlaying();
-      else showLoading("Connecting…");
-    };
+    const onPlay = () => { if (!a.paused && (a.currentTime > 0 || a.readyState >= 2)) setPlaying(); else showLoading("Connecting…"); };
     const onWaiting = () => showLoading("Buffering…");
-    const onTimeUpdate = () => {
-      if (!a.paused && a.currentTime > 0) setPlaying();
-    };
-    const onCanPlay = () => {
-      if (!a.paused) setPlaying();
-      else setPaused();
-    };
-    const onLoadedData = () => {
-      if (!a.paused) setPlaying();
-    };
-    const onLoadedMetadata = () => {
-      if (!a.paused) setPlaying();
-    };
-    const onProgress = () => {
-      if (!a.paused && (a.currentTime > 0 || a.readyState >= 2)) setPlaying();
-    };
+    const onTimeUpdate = () => { if (!a.paused && a.currentTime > 0) setPlaying(); };
+    const onCanPlay = () => { if (!a.paused) setPlaying(); else setPaused(); };
+    const onLoadedData = () => { if (!a.paused) setPlaying(); };
+    const onLoadedMetadata = () => { if (!a.paused) setPlaying(); };
+    const onProgress = () => { if (!a.paused && (a.currentTime > 0 || a.readyState >= 2)) setPlaying(); };
     const onPlaying = () => setPlaying();
     const onPause = () => setPaused();
     const onStalled = () => showLoading("Buffering…");
     const onEnded = () => setPaused("Ended");
-    const onError = () => {
-      setPlayer({ status: "error", msg: "Playback error" });
-      setPlayingStreamId(null);
-    };
+    const onError = () => { setPlayer({ status: "error", msg: "Playback error" }); };
 
-    a.addEventListener("loadstart", onLoadStart);
-    a.addEventListener("play", onPlay);
-    a.addEventListener("waiting", onWaiting);
-    a.addEventListener("timeupdate", onTimeUpdate);
-    a.addEventListener("canplay", onCanPlay);
-    a.addEventListener("loadeddata", onLoadedData);
-    a.addEventListener("loadedmetadata", onLoadedMetadata);
-    a.addEventListener("progress", onProgress);
-    a.addEventListener("playing", onPlaying);
-    a.addEventListener("pause", onPause);
-    a.addEventListener("stalled", onStalled);
-    a.addEventListener("ended", onEnded);
-    a.addEventListener("error", onError);
-
-    // Health check for live streams that miss events
-    const health = setInterval(() => {
-      if (!a.paused && (a.currentTime > 0 || a.readyState >= 3)) setPlaying();
-    }, 500);
+    const events = [
+      ["loadstart", onLoadStart], ["play", onPlay], ["waiting", onWaiting],
+      ["timeupdate", onTimeUpdate], ["canplay", onCanPlay], ["loadeddata", onLoadedData],
+      ["loadedmetadata", onLoadedMetadata], ["progress", onProgress], ["playing", onPlaying],
+      ["pause", onPause], ["stalled", onStalled], ["ended", onEnded], ["error", onError],
+    ];
+    events.forEach(([e, h]) => a.addEventListener(e, h));
+    const health = setInterval(() => { if (!a.paused && (a.currentTime > 0 || a.readyState >= 3)) setPlaying(); }, 500);
 
     return () => {
-      a.removeEventListener("loadstart", onLoadStart);
-      a.removeEventListener("play", onPlay);
-      a.removeEventListener("waiting", onWaiting);
-      a.removeEventListener("timeupdate", onTimeUpdate);
-      a.removeEventListener("canplay", onCanPlay);
-      a.removeEventListener("loadeddata", onLoadedData);
-      a.removeEventListener("loadedmetadata", onLoadedMetadata);
-      a.removeEventListener("progress", onProgress);
-      a.removeEventListener("playing", onPlaying);
-      a.removeEventListener("pause", onPause);
-      a.removeEventListener("stalled", onStalled);
-      a.removeEventListener("ended", onEnded);
-      a.removeEventListener("error", onError);
+      events.forEach(([e, h]) => a.removeEventListener(e, h));
       clearWaiting();
       clearInterval(health);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playingStreamId]);
 
-  // Reset any stale loading when switching stream
+  // Save viewing stream to localStorage
   useEffect(() => {
-    if (!activeStream) return;
-    localStorage.setItem("activeStreamId", activeStream.id);
-    setPlayer((p) => (p.status === "loading" ? { status: "paused", msg: "" } : p));
-  }, [activeStream]);
+    if (viewingStreamId) localStorage.setItem("activeStreamId", viewingStreamId);
+  }, [viewingStreamId]);
 
-  // ─── Building the playable URL (fallback if API returns /s/...) ─────────────
+  // ─── Playable URL ──────────────────────────────────────────────────────────
   function getPlayableUrl(s) {
     if (!s) return "";
     let url = s.streamUrl || "";
     try {
-      // If API gives a relative path like "/s/ambiance.mp3", resolve against current origin
-      if (url.startsWith("/")) {
-        return new URL(url, window.location.origin).toString();
-      }
-      // If the app runs on HTTPS and the stream is HTTP, try an HTTPS upgrade
-      if (window.location.protocol === "https:" && url.startsWith("http://")) {
-        url = "https://" + url.slice("http://".length);
-      }
+      if (url.startsWith("/")) return new URL(url, window.location.origin).toString();
+      if (window.location.protocol === "https:" && url.startsWith("http://")) url = "https://" + url.slice("http://".length);
       return url;
-    } catch {
-      return url;
-    }
+    } catch { return url; }
   }
 
-  // ─── Local elapsed/duration tracking ────────────────────────────────────────
+  // ─── Elapsed/duration tracking ─────────────────────────────────────────────
   const [elapsedSec, setElapsedSec] = useState(0);
   const [durationSec, setDurationSec] = useState(null);
   const baseStartRef = useRef(performance.now());
 
-  // When track changes, rebase timer using server's elapsed/duration once
   useEffect(() => {
     if (!now) return;
     const serverElapsed = Number(now?.mpd?.elapsed || 0);
@@ -279,12 +255,11 @@ export default function App() {
     setDurationSec(serverDuration || null);
     setElapsedSec(serverElapsed);
     baseStartRef.current = performance.now() - serverElapsed * 1000;
-  }, [now?.file, activeStream?.id]); // rebase only on track/stream change
+  }, [now?.file, viewingStreamId]);
 
-  // While playing, tick elapsed locally
   useEffect(() => {
     const id = setInterval(() => {
-      if (!(player.status === "playing")) return;
+      if (player.status !== "playing") return;
       const ms = performance.now() - baseStartRef.current;
       const sec = ms / 1000;
       setElapsedSec(durationSec ? Math.min(sec, durationSec) : sec);
@@ -292,196 +267,247 @@ export default function App() {
     return () => clearInterval(id);
   }, [player.status, durationSec]);
 
-  // Also update duration from actual media if present
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
-    const onLoadedMetadata = () => {
-      if (isFinite(a.duration) && a.duration > 0) {
-        setDurationSec(Math.floor(a.duration));
-      }
-    };
-    a.addEventListener("loadedmetadata", onLoadedMetadata);
-    return () => a.removeEventListener("loadedmetadata", onLoadedMetadata);
+    const onMeta = () => { if (isFinite(a.duration) && a.duration > 0) setDurationSec(Math.floor(a.duration)); };
+    a.addEventListener("loadedmetadata", onMeta);
+    return () => a.removeEventListener("loadedmetadata", onMeta);
   }, []);
 
-  // Do not rebase on resume; baseline is set on real track/stream change for stability.
-// (This avoids resetting to 0 when pressing Play.)
-
-  // ─── Share helper ───────────────────────────────────────────────────────────
+  // ─── Share helper ──────────────────────────────────────────────────────────
   async function shareApp() {
     const url = window.location.href;
     try {
-      if (navigator.share) {
-        await navigator.share({ title: "PAVOIA WEBRADIO", text: "Tune in to PAVOIA WEBRADIO", url });
-      } else if (navigator.clipboard) {
-        await navigator.clipboard.writeText(url);
-        alert("Link copied to clipboard.");
-      }
+      if (navigator.share) await navigator.share({ title: "PAVOIA WEBRADIO", text: "Tune in to PAVOIA WEBRADIO", url });
+      else if (navigator.clipboard) { await navigator.clipboard.writeText(url); alert("Link copied to clipboard."); }
     } catch {}
   }
 
-  // ─── Play/Pause ─────────────────────────────────────────────────────────────
-  async function togglePlay(targetStream) {
+  // ─── Play stream (switches audio) ─────────────────────────────────────────
+  async function switchToStream(targetStream) {
     const a = audioRef.current;
-    const s = targetStream || activeStream;
+    const s = targetStream;
     if (!a || !s) return;
 
-    // Easter egg: BUS cannot be streamed
-    const activeMeta = getMetaFor(s);
-    if (activeMeta.disabled) {
-      alert("🚌 This one can’t be streamed — it must be experienced IRL!\nFind the real bus and hop on.");
-      return;
-    }
-
     let target = getPlayableUrl(s);
-    // Fallbacks + validation
-    if (!target || !/^https?:\/\//i.test(target)) {
-      target = (s.streamUrl || "").trim();
-    }
-    if (!target) {
-      console.error("No stream URL found for active stream", s);
-      alert("No stream URL found for this station.");
-      return;
-    }
+    if (!target || !/^https?:\/\//i.test(target)) target = (s.streamUrl || "").trim();
+    if (!target) { console.error("No stream URL", s); return; }
 
-    // When we switch source, remember which stream this audio belongs to
     if (!a.src || a.src !== target) {
       a.src = target;
       a.load();
       audioStreamIdRef.current = s.id;
     }
     try {
-      if (a.paused) {
-        setPlayer({ status: "loading", msg: "Connecting…" });
-        await a.play();
-        // If play() resolves we assume audio will flow
-        setTimeout(() => {
-          if (!a.paused) {
-            setPlayer({ status: "playing", msg: "" });
-            setPlayingStreamId(audioStreamIdRef.current || s.id);
-          }
-        }, 50);
-        setTimeout(() => {
-          if (!a.paused && (a.currentTime >= 0 || a.readyState >= 2)) {
-            setPlayer({ status: "playing", msg: "" });
-            setPlayingStreamId(audioStreamIdRef.current || s.id);
-          }
-        }, 1500);
-      } else {
-        a.pause();
-        setPlayingStreamId(null);
-      }
+      setPlayer({ status: "loading", msg: "Connecting…" });
+      await a.play();
+      setTimeout(() => { if (!a.paused) { setPlayer({ status: "playing", msg: "" }); setPlayingStreamId(s.id); } }, 50);
+      setTimeout(() => { if (!a.paused && (a.currentTime >= 0 || a.readyState >= 2)) { setPlayer({ status: "playing", msg: "" }); setPlayingStreamId(s.id); } }, 1500);
     } catch (e) {
       setPlayer({ status: "error", msg: "Unable to start audio" });
-      setPlayingStreamId(null);
-      console.error("audio.play() failed", { error: e?.name || e, message: e?.message, src: target });
-      alert("Unable to start audio. Check HTTPS/reachability of the stream URL.");
+      console.error("audio.play() failed", e);
     }
   }
 
-  // Quick-select: choose stream and autoplay
-  const playStreamById = (id, closeDrawer = false) => {
-    const s = streams.find((x) => x.id === id);
-    setActiveId(id);
-    if (closeDrawer) setMobileStreamsOpen(false);
-    if (s) {
-      togglePlay(s);
+  function togglePlay() {
+    const a = audioRef.current;
+    if (!a) return;
+
+    if (a.paused) {
+      // If nothing playing yet, play the viewing stream
+      const s = playingStream || viewingStream;
+      if (s) switchToStream(s);
     } else {
-      togglePlay();
+      a.pause();
     }
-  };
+  }
 
-  // Effective status for the visible stream only
-  const effectiveStatus =
-    activeStream?.id === playingStreamId ? player.status : "paused";
+  // ─── Browse: click stream in sidebar (view only, no audio change) ──────────
+  const browseStream = useCallback((id, closeDrawer = false) => {
+    const s = streams.find((x) => x.id === id);
+    if (!s) return;
 
-  // ─── Media Session ──────────────────────────────────────────────────────────
+    const meta = getMetaFor(s);
+    if (meta.disabled) {
+      setBusCardOpen(true);
+      return;
+    }
+
+    setViewingStreamId(id);
+    if (closeDrawer) setMobileStreamsOpen(false);
+
+    // If nothing is playing yet, also start playing
+    if (!playingStreamId && player.status !== "playing" && player.status !== "loading") {
+      switchToStream(s);
+    }
+  }, [streams, playingStreamId, player.status]);
+
+  // ─── Switch: explicit switch to the viewed stream ──────────────────────────
+  const switchToViewing = useCallback(() => {
+    const s = viewingStream;
+    if (!s) return;
+    switchToStream(s);
+  }, [viewingStream]);
+
+  // Effective status for play/pause button
+  const effectiveStatus = viewingStreamId === playingStreamId ? player.status : "paused";
+
+  // ─── Keyboard shortcuts ────────────────────────────────────────────────────
+  useEffect(() => {
+    let lastKeyTime = 0;
+    function onKeyDown(e) {
+      const tag = document.activeElement?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || document.activeElement?.isContentEditable) return;
+
+      const now = Date.now();
+      if (now - lastKeyTime < 300 && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
+      lastKeyTime = now;
+
+      const activeStreams = streamOrder.filter(id => !getMetaFor(streams.find(s => s.id === id))?.disabled);
+
+      switch (e.key) {
+        case " ":
+          e.preventDefault();
+          togglePlay();
+          break;
+        case "ArrowLeft": {
+          const idx = activeStreams.indexOf(viewingStreamId);
+          const prev = idx <= 0 ? activeStreams[activeStreams.length - 1] : activeStreams[idx - 1];
+          if (prev) setViewingStreamId(prev);
+          break;
+        }
+        case "ArrowRight": {
+          const idx = activeStreams.indexOf(viewingStreamId);
+          const next = idx >= activeStreams.length - 1 ? activeStreams[0] : activeStreams[idx + 1];
+          if (next) setViewingStreamId(next);
+          break;
+        }
+        case "Enter":
+          if (isExploring) switchToViewing();
+          break;
+        case "m":
+        case "M":
+          setMuted(m => !m);
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          setVol(v => Math.min(100, v + 5));
+          break;
+        case "ArrowDown":
+          e.preventDefault();
+          setVol(v => Math.max(0, v - 5));
+          break;
+        default:
+          if (e.key >= "1" && e.key <= "9") {
+            const idx = parseInt(e.key) - 1;
+            if (activeStreams[idx]) setViewingStreamId(activeStreams[idx]);
+          }
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [streamOrder, viewingStreamId, playingStreamId, isExploring, streams]);
+
+  // ─── Media Session ─────────────────────────────────────────────────────────
   function updateMediaSession(data) {
     if (!("mediaSession" in navigator) || !data?.now) return;
     const n = data.now;
     try {
       navigator.mediaSession.metadata = new window.MediaMetadata({
-        title: n.title || "",
-        artist: n.artist || "",
-        album: n.album || "",
-        artwork: n.cover_url
-          ? [{ src: n.cover_url, sizes: "512x512", type: "image/png" }]
-          : [],
+        title: n.title || "", artist: n.artist || "", album: n.album || "",
+        artwork: n.cover_url ? [{ src: n.cover_url, sizes: "512x512", type: "image/png" }] : [],
       });
       navigator.mediaSession.setActionHandler("play", () => audioRef.current?.play());
       navigator.mediaSession.setActionHandler("pause", () => audioRef.current?.pause());
     } catch {}
   }
 
-  // ─── Render ─────────────────────────────────────────────────────────────────
-  const activeMeta = activeStream ? getMetaFor(activeStream) : null;
-  // Mobile header: show selected stream (or playing stream if different)
-  const mobileHeaderMeta = useMemo(() => {
-    const playing = streams.find((x) => x.id === playingStreamId);
-    const selected = streams.find((x) => x.id === activeId);
-    const s = playing || selected || null;
-    return s ? getMetaFor(s) : null;
-  }, [streams, playingStreamId, activeId]);
+  // ─── Render ────────────────────────────────────────────────────────────────
+  const viewingMeta = viewingStream ? getMetaFor(viewingStream) : null;
+  const playingMeta = playingStream ? getMetaFor(playingStream) : null;
 
   return (
-    <div className="min-h-screen bg-[#0b0d10] text-[#e6edf3]">
+    <div className="min-h-screen text-white relative">
+      {/* Gradient background — two stacked layers for GPU-composited opacity transition */}
+      <div
+        className={`fixed inset-0 bg-gradient-to-b ${viewingMeta?.bgGradient || "from-[#0b0d10] to-[#111520]"} transition-opacity duration-[800ms] ease-in-out`}
+        style={{ zIndex: -2 }}
+      />
+      <div className="fixed inset-0 bg-[#0b0d10]" style={{ zIndex: -3 }} />
+
+      {/* Now-playing strip (shown when exploring a different stream) */}
+      {isExploring && playingMeta && (
+        <div
+          className="fixed top-0 left-0 right-0 z-50 h-12 flex items-center gap-3 px-4 cursor-pointer border-b"
+          style={{ backgroundColor: "rgba(0,0,0,0.85)", borderColor: playingMeta.accentColor + "40" }}
+          onClick={() => setViewingStreamId(playingStreamId)}
+          title="Return to playing stream"
+        >
+          <div className="w-1 h-8 rounded-full" style={{ backgroundColor: playingMeta.accentColor }} />
+          {playingNow?.cover_url && (
+            <img src={playingNow.cover_url} alt="" className="w-8 h-8 rounded object-cover" />
+          )}
+          <span className="text-sm font-medium truncate">
+            {playingMeta.icon} Now playing: {playingNow?.artist || ""} — {playingNow?.title || playingMeta.title}
+          </span>
+          <span className="ml-auto text-xs text-slate-400">tap to return</span>
+        </div>
+      )}
+
       {/* Mobile header */}
-      <header className="md:hidden sticky top-0 z-40 bg-[#13171c]/95 backdrop-blur border-b border-[#1f2430] px-4 py-3 grid grid-cols-[auto_1fr_auto] items-center">
+      <header
+        className={`md:hidden sticky ${isExploring ? "top-12" : "top-0"} z-40 bg-black/80 backdrop-blur border-b border-white/10 px-4 py-3 grid grid-cols-[auto_1fr_auto] items-center`}
+      >
         <button
           onClick={() => setMobileStreamsOpen(true)}
-          className="px-3 py-2 rounded-lg border border-[#2b3445] bg-[#171c24] text-sm"
+          className="px-3 py-2 rounded-lg border border-white/20 bg-white/5 text-sm"
           aria-label="Open streams"
         >
           ☰ Explore
         </button>
-        <div className="px-2" aria-hidden="true"></div>
+        <div className="px-2" aria-hidden="true" />
         <button
           onClick={() => setInfoOpen(true)}
-          className="px-3 py-2 rounded-lg border border-[#2b3445] bg-[#171c24] text-sm"
-          aria-label="Info about stream quality"
-          title="About stream quality"
+          className="px-3 py-2 rounded-lg border border-white/20 bg-white/5 text-sm"
+          aria-label="Info"
         >
           ℹ️
         </button>
       </header>
 
-      <div className="md:grid md:grid-cols-[320px_1fr]">
+      <div className={`md:grid md:grid-cols-[320px_1fr] ${isExploring ? "md:pt-12" : ""}`}>
         {/* Sidebar (desktop) */}
-        <aside className="hidden md:block border-r border-[#1f2430] bg-[#13171c] p-4 overflow-auto min-h-screen">
+        <aside className="hidden md:block border-r border-white/10 bg-black/60 backdrop-blur-sm p-4 overflow-auto min-h-screen">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-bold tracking-wide">Explore</h3>
             <button
               onClick={() => setInfoOpen(true)}
-              className="px-2 py-1 rounded-lg border border-[#2b3445] bg-[#171c24] hover:border-[#3b4760] text-sm"
-              title="About stream quality"
+              className="px-2 py-1 rounded-lg border border-white/20 bg-white/5 hover:border-white/30 text-sm"
+              title="About"
             >
               ℹ️
             </button>
           </div>
-          {loadingStreams && (
-            <div className="text-sm text-slate-400">Loading streams…</div>
-          )}
-          {!loadingStreams && streams.length === 0 && (
-            <div className="text-sm text-slate-400">No streams found.</div>
-          )}
+          {loadingStreams && <div className="text-sm text-slate-400">Loading streams…</div>}
+          {!loadingStreams && streams.length === 0 && <div className="text-sm text-slate-400">No streams found.</div>}
           <StreamsList
             streams={streams}
-            activeId={activeId}
+            viewingId={viewingStreamId}
             playingId={playingStreamId}
             isPlaying={player.status === "playing"}
-            onSelect={setActiveId}
+            onSelect={browseStream}
           />
           {err && <div className="mt-3 text-xs text-amber-300">{err}</div>}
         </aside>
 
         {/* Main */}
-        <main className="p-4 md:p-5 flex items-center justify-center">
-          <div className="w-full max-w-6xl bg-gradient-to-b from-[#111520] to-[#0e1118] border border-[#22293a] rounded-2xl shadow-2xl p-4 md:p-8 relative">
-            {!activeStream ? (
-              <div className="text-slate-400">
-                Select a station from <span className="md:inline hidden">the Explore panel</span>
-                <span className="md:hidden inline"> Explore</span>.
+        <main className="p-4 md:p-5 flex items-center justify-center min-h-[80vh]">
+          <div className="w-full max-w-3xl">
+            {!viewingStream ? (
+              <div className="text-slate-400 text-center py-20">
+                <p className="text-lg mb-2">Pick a stage to begin</p>
+                <p className="text-sm">Choose a stream from the sidebar to start listening</p>
               </div>
             ) : (
               <>
@@ -492,49 +518,57 @@ export default function App() {
                   onArtistClick={() => artistCard && setDrawerOpen(true)}
                   elapsed={elapsedSec}
                   duration={durationSec}
-                  showPlaying={activeStream?.id === playingStreamId && player.status === "playing"}
+                  showPlaying={viewingStreamId === playingStreamId && player.status === "playing"}
+                  isExploring={isExploring}
+                  viewingMeta={viewingMeta}
                 />
 
-                {/* Controls */}
+                {/* Controls — same position for play/pause AND switch */}
                 <div className="mt-5 flex md:flex-row flex-col items-stretch md:items-center gap-3">
                   <div className="flex gap-3">
-                    <PlayPauseButton status={effectiveStatus} onClick={() => togglePlay()} />
+                    {isExploring ? (
+                      <button
+                        onClick={switchToViewing}
+                        className="group relative inline-flex items-center gap-3 px-5 py-2.5 rounded-xl border transition shadow-sm"
+                        style={{
+                          borderColor: viewingMeta?.accentColor || "#64748b",
+                          backgroundColor: (viewingMeta?.accentColor || "#64748b") + "20",
+                        }}
+                      >
+                        <span className="text-sm font-semibold">Switch to this stage</span>
+                      </button>
+                    ) : (
+                      <PlayPauseButton status={effectiveStatus} onClick={togglePlay} />
+                    )}
                     <button
                       onClick={() => setMuted((m) => !m)}
-                      className="px-4 py-2 rounded-xl border border-[#2b3445] bg-[#171c24] hover:border-[#3b4760]"
+                      className="px-4 py-2 rounded-xl border border-white/20 bg-white/5 hover:border-white/30"
                     >
-                      {muted || vol === 0 ? "🔇 Mute" : "🔊 Mute"}
+                      {muted || vol === 0 ? "🔇" : "🔊"}
                     </button>
                   </div>
 
-                  {/* Simple volume slider */}
-                  <div className="flex items-center gap-3 flex-1 min-w-[240px]">
-                    <span className="text-xs text-slate-400">Volume</span>
+                  <div className="flex items-center gap-3 flex-1 min-w-[200px]">
                     <input
-                      id="vol"
-                      type="range"
-                      min={0}
-                      max={100}
+                      type="range" min={0} max={100}
                       value={muted ? 0 : vol}
-                      className="w-full"
+                      className="w-full accent-cyan-300"
                       onChange={(e) => {
                         const v = Math.max(0, Math.min(100, Number(e.target.value)));
                         setVol(v);
                         if (v > 0 && muted) setMuted(false);
                       }}
                     />
-                    <span className="text-xs text-slate-300 w-10 text-right">
-                      {muted ? 0 : vol}%
-                    </span>
+                    <span className="text-xs text-slate-300 w-10 text-right">{muted ? 0 : vol}%</span>
                   </div>
                 </div>
 
-                {/* Stream info below slider (moved from badge) */}
-                {activeMeta && (
-                  <div className="mt-2 text-sm text-slate-300 flex flex-wrap items-center gap-2">
-                    <span className="font-semibold">{activeMeta.icon} {activeMeta.title}</span>
-                    <span className="text-slate-500">—</span>
-                    <span className="text-slate-400">{activeMeta.desc}</span>
+                {/* Stream info */}
+                {viewingMeta && (
+                  <div className="mt-3 text-sm text-white/70 flex flex-wrap items-center gap-2">
+                    <span className="font-semibold">{viewingMeta.icon} {viewingMeta.title}</span>
+                    <span className="text-white/30">·</span>
+                    <span className="text-white/50">{viewingMeta.desc}</span>
                   </div>
                 )}
 
@@ -542,32 +576,29 @@ export default function App() {
                 <audio ref={audioRef} preload="none" playsInline className="hidden" crossOrigin="anonymous" />
 
                 {/* Artist Drawer */}
-                <ArtistDrawer
-                  open={drawerOpen}
-                  onClose={() => setDrawerOpen(false)}
-                  artist={artistCard}
-                />
+                <ArtistDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} artist={artistCard} />
               </>
             )}
           </div>
         </main>
       </div>
 
-      {/* Streams Drawer (mobile) */}
+      {/* Mobile Streams Drawer */}
       <StreamsDrawer
         open={mobileStreamsOpen}
         onClose={() => setMobileStreamsOpen(false)}
         streams={streams}
-        activeId={activeId}
+        viewingId={viewingStreamId}
         playingId={playingStreamId}
         isPlaying={player.status === "playing"}
-        onSelect={(id) => { setActiveId(id); setMobileStreamsOpen(false); }}
+        onSelect={(id) => browseStream(id, true)}
       />
 
       {/* Info Modal */}
       <InfoDialog open={infoOpen} onClose={() => setInfoOpen(false)} onShare={shareApp} />
+
+      {/* Bus Mystery Card */}
+      <BusMysteryCard open={busCardOpen} onClose={() => setBusCardOpen(false)} />
     </div>
   );
 }
-
-// ─── Stream metadata mapping ──────────────────────────────────────────────────
