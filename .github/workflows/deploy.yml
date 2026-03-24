@@ -1,0 +1,55 @@
+name: Deploy to Whatbox
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install & build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Deploy to Whatbox
+        env:
+          WHATBOX_KEY: ${{ secrets.WHATBOX_SSH_KEY }}
+          WHATBOX_HOST: orange.whatbox.ca
+          WHATBOX_USER: yolan
+        run: |
+          mkdir -p ~/.ssh
+          echo "$WHATBOX_KEY" > ~/.ssh/id_whatbox
+          chmod 600 ~/.ssh/id_whatbox
+          ssh-keyscan -H $WHATBOX_HOST >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Deploy built frontend
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/id_whatbox" \
+            frontend/dist/ \
+            $WHATBOX_USER@$WHATBOX_HOST:~/files/Webradio/scripts/streaming-metadata-webradio/frontend/dist/
+
+          # Deploy server.js
+          rsync -avz \
+            -e "ssh -i ~/.ssh/id_whatbox" \
+            server.js \
+            $WHATBOX_USER@$WHATBOX_HOST:~/files/Webradio/scripts/streaming-metadata-webradio/server.js
+
+          # Restart server
+          ssh -i ~/.ssh/id_whatbox $WHATBOX_USER@$WHATBOX_HOST '
+            cd ~/files/Webradio/scripts/streaming-metadata-webradio
+            kill $(cat server.pid) 2>/dev/null; sleep 1
+            PORT=20001 nohup node server.js > /dev/null 2>&1 &
+            echo $! > server.pid
+            echo "Server restarted with PID $(cat server.pid)"
+          '
