@@ -247,8 +247,13 @@ export default function App() {
   }, [switchStream]);
 
   function togglePlay() {
-    if (playerStatus === "playing") { pause(); }
-    else {
+    if (playerStatus === "playing") {
+      pause();
+    } else if (playerStatus === "paused" && playingStreamId) {
+      // Resume the same stream
+      play();
+    } else {
+      // Nothing loaded yet — switch to viewing stream
       const s = playingStream || viewingStream;
       if (s) doSwitchToStream(s);
     }
@@ -280,8 +285,8 @@ export default function App() {
     prevViewingRef.current = id;
     if (closeDrawer) setMobileStreamsOpen(false);
 
-    // If nothing playing yet, start playing
-    if (!playingStreamId && playerStatus !== "playing" && playerStatus !== "loading") {
+    // If nothing playing yet, auto-start playing the first stream clicked
+    if (!playingStreamId) {
       doSwitchToStream(s);
     }
   }, [streams, playingStreamId, playerStatus, now, doSwitchToStream]);
@@ -390,10 +395,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen text-white relative">
-      {/* Gradient background layers (GPU-composited opacity transition) */}
+      {/* Gradient background layers (inline styles — Tailwind can't detect dynamic gradient classes) */}
       <div
-        className={`fixed inset-0 bg-gradient-to-b ${viewingMeta?.bgGradient || "from-[#0b0d10] to-[#111520]"} transition-opacity duration-[800ms] ease-in-out`}
-        style={{ zIndex: -2 }}
+        className="fixed inset-0 transition-all duration-[800ms] ease-in-out"
+        style={{
+          zIndex: -2,
+          background: viewingMeta ? `linear-gradient(to bottom, ${viewingMeta.gradientFrom || '#0b0d10'}, ${viewingMeta.gradientVia || '#111520'}, ${viewingMeta.gradientTo || '#0b0d10'})` : 'linear-gradient(to bottom, #0b0d10, #111520)',
+        }}
       />
       <div className="fixed inset-0 bg-[#0b0d10]" style={{ zIndex: -3 }} />
 
