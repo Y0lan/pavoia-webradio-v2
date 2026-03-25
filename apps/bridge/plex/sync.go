@@ -2,6 +2,7 @@ package plex
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -89,7 +90,7 @@ func (w *SyncWorker) SyncAll(ctx context.Context) []SyncResult {
 			results = append(results, SyncResult{
 				StageID:  mapping.StageID,
 				Playlist: mapping.PlaylistName,
-				Error:    err,
+				Error:    fmt.Errorf("playlist %q not found in Plex", mapping.PlaylistName),
 			})
 			continue
 		}
@@ -130,14 +131,22 @@ func (w *SyncWorker) syncPlaylist(ctx context.Context, playlist *Playlist, stage
 			addedAt = time.Now()
 		}
 
-		// Upsert: insert if file_path doesn't exist, skip if it does
+		// Upsert: insert if new, update metadata if exists (catches re-tagged files in Plex).
+		// Note: a track can only belong to one stage. If the same file is in multiple
+		// Plex playlists, the last-synced playlist wins the stage_id assignment.
 		tag, err := w.db.Exec(ctx, `
 			INSERT INTO library_tracks (file_path, title, artist, album, genre, year, duration_sec, file_format, stage_id, plex_rating_key, plex_added_at, added_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
 			ON CONFLICT (file_path) DO UPDATE SET
+				title = EXCLUDED.title,
+				artist = EXCLUDED.artist,
+				album = EXCLUDED.album,
+				genre = EXCLUDED.genre,
+				year = EXCLUDED.year,
+				duration_sec = EXCLUDED.duration_sec,
+				file_format = EXCLUDED.file_format,
 				stage_id = EXCLUDED.stage_id,
 				plex_rating_key = EXCLUDED.plex_rating_key
-			WHERE library_tracks.stage_id IS DISTINCT FROM EXCLUDED.stage_id
 		`,
 			track.FilePath,
 			track.Title,

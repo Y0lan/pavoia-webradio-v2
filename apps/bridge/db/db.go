@@ -42,8 +42,18 @@ func Connect(ctx context.Context, databaseURL string) (*DB, error) {
 	return &DB{Pool: pool}, nil
 }
 
-// Migrate runs all SQL migration files in order.
+// Migrate runs all SQL migration files in order, tracking which have already been applied.
 func (d *DB) Migrate(ctx context.Context) error {
+	// Create tracking table if it doesn't exist
+	if _, err := d.Pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			filename TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ DEFAULT now()
+		)
+	`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
 	entries, err := migrations.ReadDir("migrations")
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
@@ -53,6 +63,16 @@ func (d *DB) Migrate(ctx context.Context) error {
 		if entry.IsDir() {
 			continue
 		}
+
+		// Check if already applied
+		var count int
+		if err := d.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE filename = $1", entry.Name()).Scan(&count); err != nil {
+			return fmt.Errorf("check migration %s: %w", entry.Name(), err)
+		}
+		if count > 0 {
+			continue // already applied
+		}
+
 		sql, err := migrations.ReadFile("migrations/" + entry.Name())
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
@@ -61,6 +81,11 @@ func (d *DB) Migrate(ctx context.Context) error {
 		slog.Info("running migration", "file", entry.Name())
 		if _, err := d.Pool.Exec(ctx, string(sql)); err != nil {
 			return fmt.Errorf("execute migration %s: %w", entry.Name(), err)
+		}
+
+		// Record as applied
+		if _, err := d.Pool.Exec(ctx, "INSERT INTO schema_migrations (filename) VALUES ($1)", entry.Name()); err != nil {
+			return fmt.Errorf("record migration %s: %w", entry.Name(), err)
 		}
 	}
 

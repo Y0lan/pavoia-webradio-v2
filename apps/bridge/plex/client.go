@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -98,6 +99,7 @@ func (c *Client) PlaylistTracks(ratingKey string) ([]Track, error) {
 			} `json:"Genre"`
 		}
 		if err := json.Unmarshal(raw, &item); err != nil {
+			slog.Warn("plex: skipping track with unmarshal error", "error", err)
 			continue
 		}
 
@@ -127,14 +129,29 @@ func (c *Client) PlaylistTracks(ratingKey string) ([]Track, error) {
 	return tracks, nil
 }
 
-// Healthy checks if the Plex server is reachable.
+// Healthy checks if the Plex server is reachable (uses the client's default 30s timeout).
 func (c *Client) Healthy() bool {
+	return c.HealthyWithTimeout(0)
+}
+
+// HealthyWithTimeout checks if Plex is reachable with a custom timeout.
+// Pass 0 to use the client's default timeout.
+func (c *Client) HealthyWithTimeout(timeout time.Duration) bool {
 	req, err := http.NewRequest("GET", c.baseURL+"/identity", nil)
 	if err != nil {
 		return false
 	}
 	req.Header.Set("X-Plex-Token", c.token)
-	resp, err := c.http.Do(req)
+
+	client := c.http
+	if timeout > 0 {
+		client = &http.Client{
+			Timeout:   timeout,
+			Transport: c.http.Transport,
+		}
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
@@ -162,7 +179,9 @@ func (c *Client) get(path string, result any) error {
 		return fmt.Errorf("plex %s returned %d: %s", path, resp.StatusCode, string(body))
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+	// Limit response body to 50MB to prevent memory exhaustion
+	limited := io.LimitReader(resp.Body, 50*1024*1024)
+	if err := json.NewDecoder(limited).Decode(result); err != nil {
 		return fmt.Errorf("decode response from %s: %w", path, err)
 	}
 

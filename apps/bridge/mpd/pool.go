@@ -1,9 +1,9 @@
 package mpd
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"sync"
 	"time"
 
@@ -15,7 +15,7 @@ import (
 // NowPlaying holds the current track info for a stage.
 type NowPlaying struct {
 	StageID  string            `json:"stage_id"`
-	Status   string            `json:"status"` // "play", "pause", "stop"
+	Status   string            `json:"status"` // "play", "pause", "stop", "offline", "error"
 	Song     map[string]string `json:"song"`
 	Elapsed  string            `json:"elapsed"`
 	Duration string            `json:"duration"`
@@ -34,7 +34,9 @@ type Conn struct {
 type Pool struct {
 	conns    map[string]*Conn
 	mu       sync.RWMutex
-	onChange func(np NowPlaying) // callback when now-playing changes
+	onChange func(np NowPlaying)
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 }
 
 // NewPool creates a pool from stage configs. Does not connect yet.
@@ -98,15 +100,28 @@ func (p *Pool) AllNowPlaying() []NowPlaying {
 	return result
 }
 
-// StartWatchers launches a goroutine per stage that polls for track changes.
-func (p *Pool) StartWatchers(host string) {
+// StartWatchers launches a goroutine per stage that watches for track changes.
+// Pass the parent context for graceful shutdown.
+func (p *Pool) StartWatchers(ctx context.Context, host string) {
+	watchCtx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+
 	for _, c := range p.conns {
-		go p.watchLoop(c, host)
+		p.wg.Add(1)
+		go func(conn *Conn) {
+			defer p.wg.Done()
+			p.watchLoop(watchCtx, conn, host)
+		}(c)
 	}
 }
 
-// Close disconnects all MPD connections.
+// Close disconnects all MPD connections and stops all watchers.
 func (p *Pool) Close() {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	p.wg.Wait() // Wait for all watcher goroutines to exit
+
 	for _, c := range p.conns {
 		c.mu.Lock()
 		if c.client != nil {
@@ -139,15 +154,8 @@ func (c *Conn) connect(addr string) error {
 		c.client.Close()
 	}
 
-	// Verify port is reachable with a timeout before gompd.Dial (which has no timeout)
-	testConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-	if err != nil {
-		c.alive = false
-		c.client = nil
-		return err
-	}
-	testConn.Close()
-
+	// gompd.Dial will fail naturally if the port is unreachable.
+	// No need for a separate test connection (removes TOCTOU race).
 	client, err := gompd.Dial("tcp", addr)
 	if err != nil {
 		c.alive = false
@@ -173,9 +181,18 @@ func (c *Conn) nowPlaying() NowPlaying {
 
 	status, err := c.client.Status()
 	if err != nil {
+		// Try a ping before declaring dead — could be a transient error
+		if pingErr := c.client.Ping(); pingErr != nil {
+			np.Status = "error"
+			np.Error = err.Error()
+			c.alive = false
+			c.client.Close()
+			c.client = nil // Clear client so next call returns "offline" immediately
+			return np
+		}
+		// Ping succeeded — transient error, don't kill the connection
 		np.Status = "error"
 		np.Error = err.Error()
-		c.alive = false
 		return np
 	}
 
@@ -193,26 +210,29 @@ func (c *Conn) nowPlaying() NowPlaying {
 	return np
 }
 
-// watchLoop polls MPD for changes and calls onChange when the track changes.
-// Uses MPD's idle command for efficient waiting, with reconnection on failure.
-func (p *Pool) watchLoop(conn *Conn, host string) {
+// watchLoop watches for MPD player changes using idle-based notifications.
+// It reuses a single watcher per stage instead of creating/destroying on each event.
+// Exits when ctx is cancelled.
+func (p *Pool) watchLoop(ctx context.Context, conn *Conn, host string) {
 	addr := fmt.Sprintf("%s:%d", host, conn.Stage.MPDPort)
 	var lastSong string
 
 	for {
+		// Check for shutdown
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		conn.mu.Lock()
 		alive := conn.alive
 		conn.mu.Unlock()
 
 		if !alive {
-			// Reconnect with exponential backoff
-			for delay := time.Second; ; delay = min(delay*2, 30*time.Second) {
-				slog.Info("mpd reconnecting", "stage", conn.Stage.ID, "delay", delay)
-				time.Sleep(delay)
-				if err := conn.connect(addr); err == nil {
-					slog.Info("mpd reconnected", "stage", conn.Stage.ID)
-					break
-				}
+			// Reconnect with exponential backoff, respecting context
+			if !p.reconnect(ctx, conn, addr) {
+				return // context cancelled during reconnect
 			}
 		}
 
@@ -226,30 +246,64 @@ func (p *Pool) watchLoop(conn *Conn, host string) {
 			}
 		}
 
-		// Wait for MPD player subsystem change (blocks until something happens)
-		conn.mu.Lock()
-		client := conn.client
-		conn.mu.Unlock()
-
-		if client == nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		// Use a watcher for efficient idle-based notifications
+		// Create a watcher and reuse it for multiple events
 		watcher, err := gompd.NewWatcher("tcp", addr, "", "player")
 		if err != nil {
 			slog.Warn("mpd watcher failed", "stage", conn.Stage.ID, "error", err)
-			time.Sleep(5 * time.Second)
-			continue
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
 		}
 
+		// Wait for events from this watcher until it errors or context cancels
+		p.drainWatcher(ctx, watcher, conn, &lastSong)
+		watcher.Close()
+	}
+}
+
+// drainWatcher reads events from a watcher until error or context cancellation.
+// This reuses a single connection for multiple events instead of creating a new one per event.
+func (p *Pool) drainWatcher(ctx context.Context, watcher *gompd.Watcher, conn *Conn, lastSong *string) {
+	for {
 		select {
-		case <-watcher.Event:
-			// Track changed, loop will pick up new state
+		case <-ctx.Done():
+			return
+		case _, ok := <-watcher.Event:
+			if !ok {
+				return // channel closed
+			}
+			// Track changed — get new state and notify
+			np := conn.nowPlaying()
+			songKey := np.Song["file"]
+			if songKey != *lastSong && songKey != "" {
+				*lastSong = songKey
+				if p.onChange != nil {
+					p.onChange(np)
+				}
+			}
 		case err := <-watcher.Error:
 			slog.Warn("mpd watcher error", "stage", conn.Stage.ID, "error", err)
+			return // will recreate watcher on next loop iteration
 		}
-		watcher.Close()
+	}
+}
+
+// reconnect attempts to reconnect with exponential backoff.
+// Returns false if ctx is cancelled (caller should exit).
+func (p *Pool) reconnect(ctx context.Context, conn *Conn, addr string) bool {
+	for delay := time.Second; ; delay = min(delay*2, 30*time.Second) {
+		slog.Info("mpd reconnecting", "stage", conn.Stage.ID, "delay", delay)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(delay):
+		}
+		if err := conn.connect(addr); err == nil {
+			slog.Info("mpd reconnected", "stage", conn.Stage.ID)
+			return true
+		}
 	}
 }

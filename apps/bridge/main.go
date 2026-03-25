@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,6 +28,10 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
+	// Play logging work queue (bounded, prevents goroutine accumulation)
+	var playWg sync.WaitGroup
+	playCh := make(chan mpdpool.NowPlaying, 64)
+
 	// Database
 	var database *db.DB
 	if cfg.DatabaseURL != "" {
@@ -40,26 +45,37 @@ func main() {
 				slog.Error("migration failed", "error", err)
 				os.Exit(1)
 			}
-			defer database.Close()
+
+			// Start play logger worker
+			playWg.Add(1)
+			go func() {
+				defer playWg.Done()
+				for np := range playCh {
+					logPlay(ctx, database, np)
+				}
+			}()
 		}
 	}
 
 	// MPD connection pool
-	mpdHost := envOr("MPD_HOST", "localhost")
 	pool := mpdpool.NewPool(cfg.VisibleStages(), func(np mpdpool.NowPlaying) {
 		title := np.Song["Title"]
 		artist := np.Song["Artist"]
 		slog.Info("track changed", "stage", np.StageID, "artist", artist, "title", title)
 
-		// Log play to database
+		// Send to play logger (non-blocking — drop if channel is full)
 		if database != nil {
-			go logPlay(ctx, database, np)
+			select {
+			case playCh <- np:
+			default:
+				slog.Warn("play log queue full, dropping event", "stage", np.StageID)
+			}
 		}
 	})
 
-	connected := pool.ConnectAll(mpdHost)
+	connected := pool.ConnectAll(cfg.MPDHost)
 	slog.Info("mpd pool ready", "connected", connected, "total", len(cfg.VisibleStages()))
-	pool.StartWatchers(mpdHost)
+	pool.StartWatchers(ctx, cfg.MPDHost)
 
 	// Plex sync worker
 	var plexClient *plex.Client
@@ -81,14 +97,20 @@ func main() {
 		slog.Info("plex not configured — skipping sync")
 	}
 
+	// Cache visible stages (config never changes at runtime)
+	visibleStages := cfg.VisibleStages()
+
 	mux := http.NewServeMux()
 
-	// Health endpoint
+	// Health endpoint — uses short timeouts for external checks
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		mpdStatus := mpdHealthStatus(pool, cfg)
+		healthCtx, healthCancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer healthCancel()
+
+		mpdStatus := mpdHealthStatus(pool, visibleStages)
 		dbStatus := "not_configured"
 		if database != nil {
-			if database.Healthy(r.Context()) {
+			if database.Healthy(healthCtx) {
 				dbStatus = "ok"
 			} else {
 				dbStatus = "down"
@@ -96,7 +118,7 @@ func main() {
 		}
 		plexStatus := "not_configured"
 		if plexClient != nil {
-			if plexClient.Healthy() {
+			if plexClient.HealthyWithTimeout(3 * time.Second) {
 				plexStatus = "ok"
 			} else {
 				plexStatus = "down"
@@ -106,7 +128,7 @@ func main() {
 		health := map[string]any{
 			"status": "ok",
 			"time":   time.Now().UTC().Format(time.RFC3339),
-			"stages": len(cfg.VisibleStages()),
+			"stages": len(visibleStages),
 			"checks": map[string]string{
 				"mpd":         mpdStatus,
 				"postgres":    dbStatus,
@@ -116,7 +138,9 @@ func main() {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(health)
+		if err := json.NewEncoder(w).Encode(health); err != nil {
+			slog.Debug("health response write failed", "error", err)
+		}
 	})
 
 	// Stages list with now-playing
@@ -127,9 +151,8 @@ func main() {
 			Alive      bool               `json:"alive"`
 		}
 
-		stages := cfg.VisibleStages()
-		result := make([]stageResponse, 0, len(stages))
-		for _, s := range stages {
+		result := make([]stageResponse, 0, len(visibleStages))
+		for _, s := range visibleStages {
 			result = append(result, stageResponse{
 				StageConfig: s,
 				NowPlaying:  pool.NowPlaying(s.ID),
@@ -137,7 +160,9 @@ func main() {
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		if err := json.NewEncoder(w).Encode(result); err != nil {
+			slog.Debug("stages response write failed", "error", err)
+		}
 	})
 
 	// Single stage now-playing
@@ -149,30 +174,46 @@ func main() {
 		}
 		np := pool.NowPlaying(id)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(np)
+		if err := json.NewEncoder(w).Encode(np); err != nil {
+			slog.Debug("now-playing response write failed", "error", err)
+		}
 	})
 
 	handler := corsMiddleware(mux)
 
-	// Graceful shutdown
+	server := &http.Server{
+		Addr:    cfg.Addr(),
+		Handler: handler,
+	}
+
+	// Graceful shutdown — no os.Exit, let defers run
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		slog.Info("shutting down")
-		cancel()
+
+		cancel() // Cancel context — stops watchers, sync worker
+
+		// Shut down HTTP server with timeout
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		server.Shutdown(shutdownCtx)
+
+		// Wait for play logger to drain
+		close(playCh)
+		playWg.Wait()
+
 		pool.Close()
-		if database != nil {
-			database.Close()
-		}
-		os.Exit(0)
 	}()
 
-	slog.Info("bridge starting", "addr", cfg.Addr(), "stages", len(cfg.VisibleStages()), "mpd_connected", connected)
-	if err := http.ListenAndServe(cfg.Addr(), handler); err != nil {
+	slog.Info("bridge starting", "addr", cfg.Addr(), "stages", len(visibleStages), "mpd_connected", connected)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server failed", "error", err)
 		os.Exit(1)
 	}
+
+	slog.Info("bridge stopped")
 }
 
 func logPlay(ctx context.Context, database *db.DB, np mpdpool.NowPlaying) {
@@ -185,9 +226,8 @@ func logPlay(ctx context.Context, database *db.DB, np mpdpool.NowPlaying) {
 	}
 }
 
-func mpdHealthStatus(pool *mpdpool.Pool, cfg *config.Config) string {
+func mpdHealthStatus(pool *mpdpool.Pool, stages []config.StageConfig) string {
 	aliveCount := 0
-	stages := cfg.VisibleStages()
 	for _, s := range stages {
 		if pool.IsAlive(s.ID) {
 			aliveCount++
@@ -202,8 +242,6 @@ func mpdHealthStatus(pool *mpdpool.Pool, cfg *config.Config) string {
 }
 
 func buildPlexMappings(cfg *config.Config) []plex.StageMapping {
-	// Map Plex playlist names to stage IDs
-	// The playlist names in Plex match the stage IDs (which are the MPD instance names)
 	var mappings []plex.StageMapping
 	for _, s := range cfg.VisibleStages() {
 		mappings = append(mappings, plex.StageMapping{
@@ -225,11 +263,4 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

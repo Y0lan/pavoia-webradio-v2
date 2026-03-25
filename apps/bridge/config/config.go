@@ -24,6 +24,7 @@ type StageConfig struct {
 type Config struct {
 	Host         string
 	Port         int
+	MPDHost      string
 	DatabaseURL  string
 	RedisURL     string
 	MeiliURL     string
@@ -41,6 +42,7 @@ func Load() *Config {
 	return &Config{
 		Host:          envOr("HOST", "0.0.0.0"),
 		Port:          envIntOr("PORT", 3001),
+		MPDHost:       envOr("MPD_HOST", "localhost"),
 		DatabaseURL:   envOr("DATABASE_URL", "postgres://gaende:gaende@localhost:15432/gaende?sslmode=disable"),
 		RedisURL:      envOr("REDIS_URL", "redis://localhost:16379"),
 		MeiliURL:      envOr("MEILI_URL", "http://localhost:7700"),
