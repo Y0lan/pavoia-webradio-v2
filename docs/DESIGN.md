@@ -286,3 +286,71 @@ Existing services (9 MPD + Plex) likely use 1-2 GB. If total available RAM is un
 - When I offered vertical slices (the safer, incremental approach), you chose Big Bang. You want the first impression to be the full vision — you're not building to ship incrementally, you're building to reveal something complete. That's a taste decision.
 - The visual identity excited you more than the features. The data, the transparency, the stats — those are the substance. But you know that the *vibe* is what keeps someone exploring. That's the difference between a dashboard and an experience.
 - You said you "generated" the spec and "didn't read it" — but you also know exactly what you want. The spec is a starting point, not a prison. You'll shape the product by feel once it's live. That's builder instinct.
+
+## Eng Review Findings (2026-03-26)
+
+### Architecture Decisions
+| Issue | Decision | Rationale |
+|---|---|---|
+| Meilisearch | KEEP | Seedbox has 503GB shared RAM, no hard per-user limit. ~3.2GB current usage. |
+| WebSocket + SSE dual transport | KEEP | Separation of concerns. Fallback to WS-only if proxy blocks SSE. |
+| Next.js SSR | KEEP | Full flexibility, server components, dynamic OG images. |
+| Go bridge deployment | **CHANGED → bare binary on host** | Direct localhost access to MPD (14000-14008) + Plex (31711). No container networking. |
+| Redis | KEEP | Dedicated cache layer, future-proof. |
+| Container persistence | systemd user units + linger | Test during pre-validation, fall back to tmux if linger unavailable. |
+| Stats computation | On-request | Fast enough at 3000 tracks. Add materialized views for `track_plays` if it degrades after ~1M rows. |
+| Bundle splitting | Next.js default route splitting only | No additional lazy imports. Next.js splits per route automatically. |
+| API handler patterns | Shared `ParseFilters()` + `Paginate()` middleware | DRY across 60+ endpoints. |
+| Enrichment merge | Explicit per-field priority | Last.fm: bio, image, similar, tags. MusicBrainz: country, label, MBID. Tags: union. |
+| Test strategy | TDD for Go bridge, test-after for frontend | Table-driven Go tests, Vitest + Playwright for frontend. |
+
+### Critical Fixes from Outside Voice
+1. **CORS on audio streams (SHOWSTOPPER):** MPD httpd doesn't send CORS headers. `createMediaElementSource()` requires them. **FIX: Bridge proxies audio streams via `GET /api/stream/:stageId`.** This also solves listener counting — bridge knows who's connected.
+2. **Plex `addedAt` timestamps:** Sync worker MUST extract Plex's `addedAt` field, not use Postgres `DEFAULT now()`. Otherwise the digging calendar collapses to one day on initial sync.
+3. **DATABASE_URL:** Bridge runs on host → connect to Postgres at `localhost:15432`, not `postgres:5432`.
+4. **Artist aliasing:** Electronic music has dirty metadata (aliases, feat. credits, remixer ambiguity). No dedup strategy yet — flag for v1 implementation, accept some duplicate nodes in the graph.
+5. **Re-listen file paths:** Bridge needs a mapping from Plex library paths to actual Whatbox filesystem paths (`~/files/Webradio/`). Define `MUSIC_BASE_PATH` in bridge config.
+6. **`track_plays` growth:** After ~1M rows (~1 year), add a materialized view or summary table for trend queries. On-request is fine for v1.
+7. **Font loading:** 4 custom fonts (Clash Display, Satoshi, JetBrains Mono, Instrument Serif) = 200-600KB. Use `font-display: swap`, preload critical weights, subset unused glyphs.
+
+### Pre-Validation Checklist (expanded)
+In addition to the original Podman stack validation, test these BEFORE writing code:
+- [ ] Podman containers can reach host ports (MPD, Plex) — test with `curl` from inside a container
+- [ ] systemd linger works (`loginctl enable-linger $USER`)
+- [ ] Audio stream proxying works (test: bridge forwards MPD HTTP stream, browser plays with CORS)
+- [ ] Whatbox reverse proxy supports WebSocket upgrade
+- [ ] Whatbox reverse proxy supports SSE (`text/event-stream`)
+
+### NOT in scope (v1)
+- Wrapped (seasonal, December 2026)
+- Sankey flows, crossover analysis, label treemap (expensive viz, niche value)
+- Three.js particle visualizer (Canvas 2D sufficient)
+- Track download (seedbox TOS unresolved)
+- Multi-bitrate Icecast (MPD httpd 320kbps fine for v1)
+- Discogs + Wikidata + TheAudioDB enrichment (Last.fm + MB cover 80%)
+- Digging session clustering
+- Multi-year calendar comparison
+- Artist alias deduplication (accept duplicate nodes for v1)
+
+### What already exists
+| Component | Existing | Plan reuses? |
+|---|---|---|
+| 9 MPD instances | Running on host, ports 14000-14008 | YES — bridge connects directly |
+| Plex Media Server | Running at 127.0.0.1:31711 | YES — bridge syncs from Plex API |
+| plex_webradio_sync.py | Syncs Plex playlists to disk | NO — Go bridge reimplements sync |
+| server.js cover proxy | Proxies Plex images | NO — Go bridge reimplements proxy |
+| Crontab @reboot entries | Starts MPD + Node.js | KEEP for MPD, replace Node.js entry |
+| Whatbox reverse proxy | *.nicemouth.box.ca subdomains | YES — route to new services |
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | ISSUES_OPEN (PLAN) | 10 issues, 2 critical gaps (CORS + Plex timestamps — both resolved) |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+
+- **OUTSIDE VOICE:** Claude subagent found 15 issues. 2 showstoppers (CORS on audio, Plex timestamps) both resolved with concrete fixes. Also flagged artist aliasing and track_plays growth as future risks.
+- **UNRESOLVED:** 0 — all decisions made.
+- **VERDICT:** ENG REVIEW COMPLETE — ready to implement. Run `/plan-design-review` for UI/UX audit, or start building.
