@@ -423,7 +423,7 @@ export default function App() {
           <div className="w-1 h-8 rounded-full" style={{ backgroundColor: playingMeta.accentColor }} />
           {playingNow?.cover_url && <img src={playingNow.cover_url} alt="" className="w-8 h-8 rounded object-cover" />}
           <span className="text-sm font-medium truncate">
-            {playingMeta.icon} Now playing: {playingNow?.artist || ""} — {playingNow?.title || playingMeta.title}
+            {playingMeta.icon} {playingMeta.title}: {playingNow?.artist || ""} — {playingNow?.title || "Loading…"}
           </span>
           <span className="ml-auto text-xs text-slate-400 hidden sm:inline">tap to return</span>
         </div>
