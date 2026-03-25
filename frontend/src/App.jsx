@@ -363,8 +363,10 @@ export default function App() {
   const hoverTimerRef = useRef(null);
   const handleStreamHover = useCallback((id, e) => {
     clearTimeout(hoverTimerRef.current);
+    const target = e.currentTarget;
     hoverTimerRef.current = setTimeout(() => {
-      const rect = e.currentTarget.getBoundingClientRect();
+      if (!target) return;
+      const rect = target.getBoundingClientRect();
       setPreviewStreamId(id);
       setPreviewPos({ top: rect.top, left: rect.right + 8 });
     }, 500);
