@@ -408,8 +408,8 @@ export default function App() {
       <div className="fixed inset-0 bg-[#0b0d10]" style={{ zIndex: -3 }} />
 
       {/* Hidden audio elements (owned by useCrossfade) */}
-      <audio ref={audioElements[0]} preload="none" playsInline className="hidden" crossOrigin="anonymous" />
-      <audio ref={audioElements[1]} preload="none" playsInline className="hidden" crossOrigin="anonymous" />
+      <audio ref={audioElements[0]} preload="none" playsInline className="hidden"  />
+      <audio ref={audioElements[1]} preload="none" playsInline className="hidden"  />
 
       {/* Now-playing strip (exploring a different stream) */}
       {isExploring && playingMeta && (
