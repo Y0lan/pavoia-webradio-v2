@@ -188,35 +188,64 @@ export function useCrossfade() {
       newEl.pause();
     }
 
-    // Load the new stream — for live streams, skip canplay (unreliable
-    // with infinite streams) and call play() directly. The play() promise
-    // resolves when the browser has buffered enough to start playback.
-    // Stop old element first — browsers reject play() on a second
-    // audio element while one is already active on live streams
-    if (oldEl && !oldEl.paused) {
-      oldEl.volume = 0;
-      oldEl.pause();
-    }
-
     newEl.src = url;
     newEl.load();
     newEl.volume = 0;
 
-    newEl.play()
-      .then(() => {
+    // Try to play new stream. If browser allows concurrent audio, we get
+    // a smooth crossfade. If it rejects, we pause old first and retry.
+    function startNew() {
+      return newEl.play().then(() => {
+        if (crossfadeId.current !== myId) return;
+        activeSlot.current = newSlot;
+        setCurrentId(streamId);
+
+        const targetVol = effectiveVol();
+        rampVolume(newEl, 0, targetVol, CROSSFADE_MS, null);
+
+        // Crossfade: fade out old element
+        if (oldEl && !oldEl.paused) {
+          const oldVol = oldEl.volume;
+          const fadeStart = performance.now();
+          let oldFrame = null;
+          function tickOld(now) {
+            const t = Math.min((now - fadeStart) / CROSSFADE_MS, 1);
+            const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+            oldEl.volume = oldVol * (1 - eased);
+            if (t < 1) { oldFrame = requestAnimationFrame(tickOld); }
+            else { oldEl.volume = 0; oldEl.pause(); }
+          }
+          oldFrame = requestAnimationFrame(tickOld);
+          pauseTimer.current = setTimeout(() => {
+            cancelAnimationFrame(oldFrame);
+            if (oldEl && !oldEl.paused) { oldEl.volume = 0; oldEl.pause(); }
+          }, CROSSFADE_MS + 100);
+        }
+
+        setPlayerStatus("playing");
+      });
+    }
+
+    startNew().catch(() => {
+      if (crossfadeId.current !== myId) return;
+      // Browser rejected concurrent audio — pause old and retry
+      if (oldEl && !oldEl.paused) { oldEl.volume = 0; oldEl.pause(); }
+      newEl.load();
+      newEl.volume = 0;
+      return newEl.play().then(() => {
         if (crossfadeId.current !== myId) return;
         activeSlot.current = newSlot;
         setCurrentId(streamId);
         rampVolume(newEl, 0, effectiveVol(), CROSSFADE_MS, null);
         setPlayerStatus("playing");
-      })
-      .catch(() => {
-        if (crossfadeId.current !== myId) return;
-        newEl.pause();
-        newEl.removeAttribute("src");
-        newEl.load();
-        setPlayerStatus("error", "Unable to start audio");
       });
+    }).catch(() => {
+      if (crossfadeId.current !== myId) return;
+      newEl.pause();
+      newEl.removeAttribute("src");
+      newEl.load();
+      setPlayerStatus("error", "Unable to start audio");
+    });
   }, [setPlayerStatus]);
 
   // --- Play / pause ---
