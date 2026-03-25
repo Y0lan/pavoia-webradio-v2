@@ -1,5 +1,16 @@
 module github.com/Y0lan/pavoia-webradio-v2/apps/bridge
 
-go 1.24.1
+go 1.25.0
 
-require github.com/fhs/gompd/v2 v2.3.0
+require (
+	github.com/fhs/gompd/v2 v2.3.0
+	github.com/jackc/pgx/v5 v5.9.1
+)
+
+require (
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	golang.org/x/sync v0.17.0 // indirect
+	golang.org/x/text v0.29.0 // indirect
+)
