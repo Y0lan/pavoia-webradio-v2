@@ -133,10 +133,10 @@ If the seedbox's proxy doesn't support SSE cleanly, collapse both into the WebSo
 **Phase 2: Next.js 15 Frontend**
 - Root layout: AudioProvider, WebSocketProvider, MediaSessionBridge, PlayerBar, Sidebar (never unmounts)
 - Audio engine: dual-slot crossfade (5 curves), AnalyserNode, volume/mute
-- Visual identity: CSS custom properties (the GAENDE palette), Clash Display + Satoshi + JetBrains Mono + Instrument Serif
+- Visual identity: Cyber-brutalist terminal aesthetic per `docs/DESIGN_SYSTEM.md`. Syne + JetBrains Mono + Space Mono + Instrument Serif. Void-dark backgrounds, cyan-green accent (#00ffc8), angular clip-paths, scanlines, CRT vignette, glitch effects.
 - Stage selector (/) — 3x3 grid with live preview, mini visualizers, listener counts
 - Stage/Now Playing (/stage/[id]) — hero album art, blurred backdrop, full visualizer, metadata badges
-- About (/about) — mesh gradient, letter reveal, bio with Instrument Serif, Anti-Algorithm badge
+- About (/about) — grid background, floating orbs, matrix rain, dual-layer glitch title, bio with Instrument Serif, Anti-Algorithm skew badge
 - Dashboard (/dashboard) — Quick Pulse, mini digging calendar, today's additions, taste snapshot, insights
 - Digging Calendar (/digging) — GitHub-style heatmap, 5 color modes, streaks, patterns, day drill-down
 - History (/history) — played/added tabs, 4 view modes, 7 filters, re-listen, download
@@ -185,7 +185,7 @@ If the seedbox's proxy doesn't support SSE cleanly, collapse both into the WebSo
 | PWA | Next.js native + Serwist | Installable, offline shell, Media Session API |
 | Artist Data | v1: Last.fm + MusicBrainz. v2: + Discogs + Wikidata + TheAudioDB | Start with best 2 sources, add tiers later |
 | Containers | Podman + podman-compose | Rootless, daemonless — seedbox has no root |
-| Fonts | Clash Display + Satoshi + JetBrains Mono + Instrument Serif | Each font has a role in the identity |
+| Fonts | Syne + JetBrains Mono + Space Mono + Instrument Serif | Cyber-brutalist terminal aesthetic. Full spec in `docs/DESIGN_SYSTEM.md`. |
 
 ## Deferred to v2
 
@@ -311,7 +311,7 @@ Existing services (9 MPD + Plex) likely use 1-2 GB. If total available RAM is un
 4. **Artist aliasing:** Electronic music has dirty metadata (aliases, feat. credits, remixer ambiguity). No dedup strategy yet — flag for v1 implementation, accept some duplicate nodes in the graph.
 5. **Re-listen file paths:** Bridge needs a mapping from Plex library paths to actual Whatbox filesystem paths (`~/files/Webradio/`). Define `MUSIC_BASE_PATH` in bridge config.
 6. **`track_plays` growth:** After ~1M rows (~1 year), add a materialized view or summary table for trend queries. On-request is fine for v1.
-7. **Font loading:** 4 custom fonts (Clash Display, Satoshi, JetBrains Mono, Instrument Serif) = 200-600KB. Use `font-display: swap`, preload critical weights, subset unused glyphs.
+7. **Font loading:** 4 custom fonts (Syne, JetBrains Mono, Space Mono, Instrument Serif) = 200-600KB. Use `font-display: swap`, preload critical weights, subset unused glyphs. Syne and Space Mono are on Google Fonts (CDN option). JetBrains Mono via JetBrains CDN or self-hosted.
 
 ### Pre-Validation Checklist (expanded)
 In addition to the original Podman stack validation, test these BEFORE writing code:
