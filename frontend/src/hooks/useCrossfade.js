@@ -149,12 +149,17 @@ export function useCrossfade() {
 
     // Kick off playback — the 'playing' event fires when audio is flowing
     newEl.play().catch(() => {
-      // play() rejected — clean up, old stream keeps going
-      newEl.removeEventListener("playing", onPlaying);
-      newEl.removeEventListener("error", onError);
+      // play() rejected on standby element (autoplay policy) —
+      // fall back: pause old element to free the audio context, then retry
       if (switchId.current !== myId) return;
-      newEl.pause();
-      setPlayerStatus(oldEl && !oldEl.paused ? "playing" : "error", "Unable to start audio");
+      if (oldEl && !oldEl.paused) { oldEl.pause(); }
+      newEl.play().catch(() => {
+        newEl.removeEventListener("playing", onPlaying);
+        newEl.removeEventListener("error", onError);
+        if (switchId.current !== myId) return;
+        newEl.pause();
+        setPlayerStatus("error", "Unable to start audio — tap to retry");
+      });
     });
   }, [setPlayerStatus]);
 

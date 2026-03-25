@@ -504,10 +504,15 @@ export default function App() {
                     {isExploring ? (
                       <button
                         onClick={switchToViewing}
-                        className="group relative inline-flex items-center gap-3 px-5 py-2.5 rounded-xl border transition shadow-sm hover:brightness-110"
+                        disabled={playerStatus === "loading"}
+                        className="group relative inline-flex items-center gap-3 px-5 py-2.5 rounded-xl border transition shadow-sm hover:brightness-110 disabled:opacity-70"
                         style={{ borderColor: viewingMeta?.accentColor || "#64748b", backgroundColor: (viewingMeta?.accentColor || "#64748b") + "20" }}
                       >
-                        <span className="text-sm font-semibold">Switch to this stage</span>
+                        {playerStatus === "loading" ? (
+                          <span className="text-sm font-semibold animate-pulse">Switching stage…</span>
+                        ) : (
+                          <span className="text-sm font-semibold">Switch to this stage</span>
+                        )}
                       </button>
                     ) : (
                       <PlayPauseButton status={effectiveStatus} onClick={togglePlay} />
