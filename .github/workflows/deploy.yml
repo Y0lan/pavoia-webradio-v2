@@ -1,4 +1,4 @@
-name: Deploy to Whatbox
+name: Deploy v2 to Whatbox
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
           npm ci
           npm run build
 
-      - name: Deploy to Whatbox
+      - name: Deploy v2 to Whatbox
         env:
           WHATBOX_KEY: ${{ secrets.WHATBOX_SSH_KEY }}
           WHATBOX_HOST: orange.whatbox.ca
@@ -33,23 +33,27 @@ jobs:
           chmod 600 ~/.ssh/id_whatbox
           ssh-keyscan -H $WHATBOX_HOST >> ~/.ssh/known_hosts 2>/dev/null
 
+          # Create v2 directory
+          ssh -i ~/.ssh/id_whatbox $WHATBOX_USER@$WHATBOX_HOST \
+            'mkdir -p ~/files/Webradio/scripts/streaming-metadata-webradio-v2/frontend/dist'
+
           # Deploy built frontend
           rsync -avz --delete \
             -e "ssh -i ~/.ssh/id_whatbox" \
             frontend/dist/ \
-            $WHATBOX_USER@$WHATBOX_HOST:~/files/Webradio/scripts/streaming-metadata-webradio/frontend/dist/
+            $WHATBOX_USER@$WHATBOX_HOST:~/files/Webradio/scripts/streaming-metadata-webradio-v2/frontend/dist/
 
           # Deploy server.js
           rsync -avz \
             -e "ssh -i ~/.ssh/id_whatbox" \
             server.js \
-            $WHATBOX_USER@$WHATBOX_HOST:~/files/Webradio/scripts/streaming-metadata-webradio/server.js
+            $WHATBOX_USER@$WHATBOX_HOST:~/files/Webradio/scripts/streaming-metadata-webradio-v2/server.js
 
-          # Restart server
+          # Restart v2 server on port 20002
           ssh -i ~/.ssh/id_whatbox $WHATBOX_USER@$WHATBOX_HOST '
-            cd ~/files/Webradio/scripts/streaming-metadata-webradio
-            kill $(cat server.pid) 2>/dev/null; sleep 1
-            PORT=20001 nohup node server.js > /dev/null 2>&1 &
+            cd ~/files/Webradio/scripts/streaming-metadata-webradio-v2
+            kill $(cat server.pid 2>/dev/null) 2>/dev/null; sleep 1
+            PORT=20002 nohup node server.js > /dev/null 2>&1 &
             echo $! > server.pid
-            echo "Server restarted with PID $(cat server.pid)"
+            echo "v2 server restarted with PID $(cat server.pid) on port 20002"
           '
