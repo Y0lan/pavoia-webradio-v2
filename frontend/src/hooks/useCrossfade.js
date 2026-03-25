@@ -8,7 +8,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 // ---------------------------------------------------------------------------
 
 const CROSSFADE_MS = 1500;
-const CANPLAY_TIMEOUT = 8000;
 const HEALTH_INTERVAL = 500;
 const LOADING_DEBOUNCE = 150;
 
@@ -189,41 +188,15 @@ export function useCrossfade() {
       newEl.pause();
     }
 
-    // Load the new stream
+    // Load the new stream — for live streams, skip canplay (unreliable
+    // with infinite streams) and call play() directly. The play() promise
+    // resolves when the browser has buffered enough to start playback.
     newEl.src = url;
-    newEl.load();
     newEl.volume = 0;
 
-    // Wait for canplay with timeout
-    const canplayPromise = new Promise((resolve, reject) => {
-      let settled = false;
-      const timeout = setTimeout(() => { if (!settled) { settled = true; reject(new Error("timeout")); } }, CANPLAY_TIMEOUT);
-
-      function onCanPlay() {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        newEl.removeEventListener("canplay", onCanPlay);
-        newEl.removeEventListener("error", onErr);
-        resolve();
-      }
-      function onErr() {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        newEl.removeEventListener("canplay", onCanPlay);
-        newEl.removeEventListener("error", onErr);
-        reject(new Error("network"));
-      }
-      newEl.addEventListener("canplay", onCanPlay);
-      newEl.addEventListener("error", onErr);
-    });
-
-    canplayPromise
+    newEl.play()
       .then(() => {
         if (crossfadeId.current !== myId) return;
-        return newEl.play().then(() => {
-          if (crossfadeId.current !== myId) return;
 
           activeSlot.current = newSlot;
           setCurrentId(streamId);
@@ -262,21 +235,13 @@ export function useCrossfade() {
           }
 
           setPlayerStatus("playing");
-        });
       })
-      .catch((err) => {
+      .catch(() => {
         if (crossfadeId.current !== myId) return;
         newEl.pause();
         newEl.removeAttribute("src");
         newEl.load();
-
-        if (err?.message === "timeout") {
-          setPlayerStatus("error", "Stream took too long to load");
-        } else if (err?.message === "network") {
-          setPlayerStatus("error", "Could not connect to stream");
-        } else {
-          setPlayerStatus("error", "Unable to start audio");
-        }
+        setPlayerStatus("error", "Unable to start audio");
       });
   }, [setPlayerStatus]);
 
