@@ -85,16 +85,17 @@ func defaultStages() []StageConfig {
 	}
 
 	// Default 9 stages matching the existing MPD instances on Whatbox
+	// MPD control ports are 6600-6608, HTTP stream ports are 14000-14008
 	return []StageConfig{
-		{ID: "gaende-favorites", Name: "Main Stage", Description: "Progressive melodic techno, the heart of GAENDE", MPDPort: 14000, StreamPort: 18000, Genre: "Progressive Melodic Techno", Color: "#00ffc8", BPMMin: 118, BPMMax: 128, Visible: true, Order: 1},
-		{ID: "etage-0", Name: "Techno Bunker", Description: "Raw, industrial, uncompromising", MPDPort: 14001, StreamPort: 18001, Genre: "Techno", Color: "#ff0066", BPMMin: 130, BPMMax: 145, Visible: true, Order: 2},
-		{ID: "ambiance-safe", Name: "Ambient Horizon", Description: "Ambient, downtempo, introspective", MPDPort: 14002, StreamPort: 18002, Genre: "Ambient", Color: "#00ddff", BPMMin: 70, BPMMax: 110, Visible: true, Order: 3},
-		{ID: "palac-dance", Name: "Indie Floor", Description: "Indie dance, nu-disco, groovy", MPDPort: 14003, StreamPort: 18003, Genre: "Indie Dance", Color: "#ffaa00", BPMMin: 110, BPMMax: 125, Visible: true, Order: 4},
-		{ID: "fontanna-laputa", Name: "Deep Current", Description: "Deep house, organic, hypnotic", MPDPort: 14004, StreamPort: 18004, Genre: "Deep House", Color: "#7b7bff", BPMMin: 115, BPMMax: 124, Visible: true, Order: 5},
-		{ID: "palac-slow-hypno", Name: "Chill Terrace", Description: "Lo-fi, chillout, balearic", MPDPort: 14005, StreamPort: 18005, Genre: "Chillout", Color: "#44ddff", BPMMin: 80, BPMMax: 110, Visible: true, Order: 6},
-		{ID: "bermuda-night", Name: "Bass Cave", Description: "DnB, breakbeat, UK garage", MPDPort: 14006, StreamPort: 18006, Genre: "DnB", Color: "#ff44ff", BPMMin: 140, BPMMax: 174, Visible: true, Order: 7},
-		{ID: "bermuda-day", Name: "World Frequencies", Description: "Afro house, global bass", MPDPort: 14007, StreamPort: 18007, Genre: "Afro House", Color: "#ff4466", BPMMin: 115, BPMMax: 130, Visible: true, Order: 8},
-		{ID: "closing", Name: "Live Sets", Description: "Recorded live sets and festival recordings", MPDPort: 14008, StreamPort: 18008, Genre: "Live", Color: "#00ff88", BPMMin: 0, BPMMax: 0, Visible: true, Order: 9},
+		{ID: "gaende-favorites", Name: "Main Stage", Description: "Progressive melodic techno, the heart of GAENDE", MPDPort: 6600, StreamPort: 14000, Genre: "Progressive Melodic Techno", Color: "#00ffc8", BPMMin: 118, BPMMax: 128, Visible: true, Order: 1},
+		{ID: "etage-0", Name: "Techno Bunker", Description: "Raw, industrial, uncompromising", MPDPort: 6601, StreamPort: 14001, Genre: "Techno", Color: "#ff0066", BPMMin: 130, BPMMax: 145, Visible: true, Order: 2},
+		{ID: "ambiance-safe", Name: "Ambient Horizon", Description: "Ambient, downtempo, introspective", MPDPort: 6602, StreamPort: 14002, Genre: "Ambient", Color: "#00ddff", BPMMin: 70, BPMMax: 110, Visible: true, Order: 3},
+		{ID: "palac-dance", Name: "Indie Floor", Description: "Indie dance, nu-disco, groovy", MPDPort: 6603, StreamPort: 14003, Genre: "Indie Dance", Color: "#ffaa00", BPMMin: 110, BPMMax: 125, Visible: true, Order: 4},
+		{ID: "fontanna-laputa", Name: "Deep Current", Description: "Deep house, organic, hypnotic", MPDPort: 6604, StreamPort: 14004, Genre: "Deep House", Color: "#7b7bff", BPMMin: 115, BPMMax: 124, Visible: true, Order: 5},
+		{ID: "palac-slow-hypno", Name: "Chill Terrace", Description: "Lo-fi, chillout, balearic", MPDPort: 6605, StreamPort: 14005, Genre: "Chillout", Color: "#44ddff", BPMMin: 80, BPMMax: 110, Visible: true, Order: 6},
+		{ID: "bermuda-night", Name: "Bass Cave", Description: "DnB, breakbeat, UK garage", MPDPort: 6606, StreamPort: 14006, Genre: "DnB", Color: "#ff44ff", BPMMin: 140, BPMMax: 174, Visible: true, Order: 7},
+		{ID: "bermuda-day", Name: "World Frequencies", Description: "Afro house, global bass", MPDPort: 6607, StreamPort: 14007, Genre: "Afro House", Color: "#ff4466", BPMMin: 115, BPMMax: 130, Visible: true, Order: 8},
+		{ID: "closing", Name: "Live Sets", Description: "Recorded live sets and festival recordings", MPDPort: 6608, StreamPort: 14008, Genre: "Live", Color: "#00ff88", BPMMin: 0, BPMMax: 0, Visible: true, Order: 9},
 	}
 }
 
