@@ -410,7 +410,6 @@ export default function App() {
 
       {/* Hidden audio elements (owned by useCrossfade) */}
       <audio ref={audioElements[0]} preload="none" playsInline className="hidden"  />
-      <audio ref={audioElements[1]} preload="none" playsInline className="hidden"  />
 
       {/* Now-playing strip (exploring a different stream) */}
       {isExploring && playingMeta && (
