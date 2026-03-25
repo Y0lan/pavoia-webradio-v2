@@ -342,15 +342,59 @@ In addition to the original Podman stack validation, test these BEFORE writing c
 | Crontab @reboot entries | Starts MPD + Node.js | KEEP for MPD, replace Node.js entry |
 | Whatbox reverse proxy | *.nicemouth.box.ca subdomains | YES — route to new services |
 
+## Design Review Findings (2026-03-26)
+
+### Design Decisions
+| Issue | Decision | Rationale |
+|---|---|---|
+| Stage selector hierarchy | Flat 3x3 grid (no hero) | Stage colors provide differentiation. User knows their audience. |
+| Stats page grouping | 3 editorial clusters | // THE COLLECTION → // THE TASTE → // THE BEHAVIOR. Narrative flow. |
+| Player buffering states | Scanning laser + terminal status | Buffering: 2x scan + "BUFFERING...". Reconnecting: pulsing border + text. Offline: grayed art + "// STREAM OFFLINE". |
+| Crossfade visual | Full visual crossfade | Stage color morphs, art cross-dissolves, visualizer interpolates between analysers, progress bar at top. 3s of visual storytelling. |
+| Cold start | Show everything (including empty) | Radical transparency means showing the void. Terminal `// NO DATA` states fit the aesthetic. |
+| clip-path + box-shadow | Wrapper pattern | Outer div carries shadow, inner div carries clip-path + background. Documented in design system. |
+| Stage color scope | Contained: player bar + stage page only | All other pages use default --accent (#00ffc8). Prevents chaos with 9 different colors. |
+| Accessibility | Deferred to v2 | Primary audience is DJ peers / festival crowd. `prefers-reduced-motion` and contrast fixes are v2. |
+| Mobile full-screen player | Full layout defined | Large album art + scanning laser, track info, badges, full-width visualizer, stage name + listeners, controls, volume. Swipe down to minimize, swipe L/R to switch stages. |
+| Mobile bottom tabs | Stages / Digging / Artists / Stats / About | Core journey: listen → curation → connections → data → curator. Dashboard/History/Queue/Search/Settings in hamburger. |
+
+### Interaction State Table
+| Feature | Playing | Loading | Empty | Error | Buffering | Offline |
+|---|---|---|---|---|---|---|
+| Player bar | Art, info, mini viz, controls | Pulsing scan line | "// SELECT A STAGE" | "// STREAM ERROR" | 2x scan + "BUFFERING..." | Grayed art + "// OFFLINE" |
+| Stage card | Live dot, mini viz, listener count | Pulsing accent border | N/A | "// OFFLINE" badge, muted | N/A | Muted colors, no viz |
+| Crossfade | Color morph, art blend, viz interpolation | N/A | N/A | Snap back to source stage | N/A | N/A |
+| Dashboard | All sections populated | Pulsing bars per section | "// NO DATA — TIME TO DIG" per section | "// SYNC FAILED" in relevant section | N/A | N/A |
+| Digging calendar | Filled cells, accent gradient | Skeleton grid | "// NO DATA — TIME TO DIG" | "// CALENDAR UNAVAILABLE" | N/A | N/A |
+| Artist graph | Nodes + edges, stage colors | "// COMPUTING GRAPH..." + expanding circles | "// NOT ENOUGH DATA — NEED 5+ ARTISTS" | "// GRAPH FAILED" | N/A | N/A |
+| Search (Cmd+K) | Results list | Pulsing scan line in results area | "// NO RESULTS — TRY ANOTHER QUERY" | "// SEARCH LIMITED" (Postgres fallback) | N/A | N/A |
+| WebSocket | Live updates | N/A | N/A | Stale data shown + "// RECONNECTING" toast | N/A | N/A |
+
+### Spacing & Z-Index (additions to design system)
+**Spacing scale:** 4 / 8 / 12 / 16 / 24 / 32 / 48 / 64 / 96 px
+**Z-index map:**
+| Layer | Z-index | Element |
+|---|---|---|
+| Base | 0 | Page content |
+| Sidebar | 50 | Desktop sidebar |
+| Player bar | 100 | Fixed bottom player |
+| Modal | 200 | Search modal, dialogs |
+| Tooltip | 300 | Tooltips, context menus |
+| Toast | 400 | Notification toasts |
+| Noise | 9998 | Animated noise texture |
+| Vignette | 9999 | CRT vignette |
+| Scanlines | 10000 | Scanline overlay |
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
 | Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | ISSUES_OPEN (PLAN) | 10 issues, 2 critical gaps (CORS + Plex timestamps — both resolved) |
-| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR (PLAN) | 10 issues, 2 critical gaps — all resolved |
+| Design Review | `/plan-design-review` | UI/UX gaps | 1 | CLEAR (FULL) | score: 5/10 → 8/10, 10 decisions made |
 
-- **OUTSIDE VOICE:** Claude subagent found 15 issues. 2 showstoppers (CORS on audio, Plex timestamps) both resolved with concrete fixes. Also flagged artist aliasing and track_plays growth as future risks.
-- **UNRESOLVED:** 0 — all decisions made.
-- **VERDICT:** ENG REVIEW COMPLETE — ready to implement. Run `/plan-design-review` for UI/UX audit, or start building.
+- **OUTSIDE VOICE (eng):** Claude subagent found 15 issues. 2 showstoppers (CORS, Plex timestamps) resolved.
+- **OUTSIDE VOICE (design):** Claude subagent found 14 issues. Full interaction state table, crossfade storyboard, spacing/z-index specs added.
+- **UNRESOLVED:** 0 — all decisions made. A11y deferred to v2 by user choice.
+- **VERDICT:** ENG + DESIGN CLEARED — ready to implement.
