@@ -55,6 +55,7 @@ export default function App() {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         if (!alive) return;
+        if (!data.find(s => s.id === "bus")) data.push({ id: "bus", name: "Bus" });
         setStreams(data);
         const last = localStorage.getItem("activeStreamId");
         const def = data.find((s) => s.id === last) || data[0];
