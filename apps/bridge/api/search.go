@@ -16,14 +16,14 @@ type SearchHandlers struct {
 // HandleSearch serves GET /api/search?q=&type=&limit=
 // Falls back to Postgres ILIKE when Meilisearch is not configured.
 func (h *SearchHandlers) HandleSearch(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	q := r.URL.Query().Get("q")
 	if q == "" {
 		WriteError(w, http.StatusBadRequest, "q parameter required")
+		return
+	}
+
+	if h.DB == nil {
+		WriteError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
 

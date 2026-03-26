@@ -84,7 +84,6 @@ func (h *HistoryHandlers) HandleHistory(w http.ResponseWriter, r *http.Request) 
 		where += " AND (title ILIKE " + nextArg() + " OR artist ILIKE " + nextArg() + ")"
 		pattern := "%" + search + "%"
 		args = append(args, pattern, pattern)
-		argN++ // we used two args with same counter trick — fix
 	}
 
 	// Count total
@@ -248,15 +247,15 @@ func (h *HistoryHandlers) HandleStageHistory(w http.ResponseWriter, r *http.Requ
 
 // HandleHistoryByID serves GET /api/history/{id}
 func (h *HistoryHandlers) HandleHistoryByID(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	if h.DB == nil {
+		WriteError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
 

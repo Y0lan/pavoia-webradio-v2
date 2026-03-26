@@ -125,14 +125,14 @@ func (h *ArtistsHandlers) HandleArtistsList(w http.ResponseWriter, r *http.Reque
 
 // HandleArtistDetail serves GET /api/artists/{id}
 func (h *ArtistsHandlers) HandleArtistDetail(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	if h.DB == nil {
+		WriteError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
 
