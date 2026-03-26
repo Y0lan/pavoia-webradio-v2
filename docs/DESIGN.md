@@ -390,11 +390,14 @@ In addition to the original Podman stack validation, test these BEFORE writing c
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
-| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR (PLAN) | 10 issues, 2 critical gaps — all resolved |
+| Codex Review | `/codex review` | Independent 2nd opinion | 1 | ISSUES | 9 findings (outside voice, Step 4) |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | CLEAR (PLAN) | Step 1-3: 10 issues resolved. Step 4: 10 issues, 0 critical gaps — all resolved |
 | Design Review | `/plan-design-review` | UI/UX gaps | 1 | CLEAR (FULL) | score: 5/10 → 8/10, 10 decisions made |
+| Adversarial | Claude + Codex | Break the implementation | 1 | ISSUES → FIXED | 7 findings, 5 actionable — all accepted for fix |
 
-- **OUTSIDE VOICE (eng):** Claude subagent found 15 issues. 2 showstoppers (CORS, Plex timestamps) resolved.
+- **OUTSIDE VOICE (eng, Step 1-3):** Claude subagent found 15 issues. 2 showstoppers (CORS, Plex timestamps) resolved.
+- **OUTSIDE VOICE (eng, Step 4):** Codex found 9 issues (backpressure, dead code, origin check, r.Context, snapshot, SSE IDs). Claude subagent found 10 issues (SSE fallback, abstraction, counters, reconnection). All resolved.
+- **ADVERSARIAL (Step 4):** Claude found 5 actionable bugs: logPlay cancelled ctx, SSE write error ignored, writer goroutine no join, SSE no keepalive, SSE newline injection. All accepted for fix.
 - **OUTSIDE VOICE (design):** Claude subagent found 14 issues. Full interaction state table, crossfade storyboard, spacing/z-index specs added.
 - **UNRESOLVED:** 0 — all decisions made. A11y deferred to v2 by user choice.
-- **VERDICT:** ENG + DESIGN CLEARED — ready to implement.
+- **VERDICT:** ENG + DESIGN CLEARED — ready to implement. Step 4 fixes pending implementation.

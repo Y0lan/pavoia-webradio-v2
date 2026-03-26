@@ -12,8 +12,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/api"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/config"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/db"
+	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/hub"
 	mpdpool "github.com/Y0lan/pavoia-webradio-v2/apps/bridge/mpd"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/plex"
 )
@@ -46,22 +50,43 @@ func main() {
 				os.Exit(1)
 			}
 
-			// Start play logger worker
+			// Start play logger worker — uses its own context so shutdown drain works
+			playCtx, playCancel := context.WithCancel(context.Background())
 			playWg.Add(1)
 			go func() {
 				defer playWg.Done()
 				for np := range playCh {
-					logPlay(ctx, database, np)
+					logPlay(playCtx, database, np)
 				}
 			}()
+			defer playCancel()
 		}
 	}
+
+	// WebSocket + SSE hub — pass valid stage IDs for subscription validation
+	stageIDs := make([]string, len(cfg.VisibleStages()))
+	for i, s := range cfg.VisibleStages() {
+		stageIDs[i] = s.ID
+	}
+	wsHub := hub.New(stageIDs...)
 
 	// MPD connection pool
 	pool := mpdpool.NewPool(cfg.VisibleStages(), func(np mpdpool.NowPlaying) {
 		title := np.Song["Title"]
 		artist := np.Song["Artist"]
 		slog.Info("track changed", "stage", np.StageID, "artist", artist, "title", title)
+
+		// Broadcast to WebSocket clients
+		wsHub.BroadcastNowPlaying(hub.NowPlayingEvent{
+			StageID:  np.StageID,
+			Status:   np.Status,
+			Title:    np.Song["Title"],
+			Artist:   np.Song["Artist"],
+			Album:    np.Song["Album"],
+			Elapsed:  np.Elapsed,
+			Duration: np.Duration,
+			File:     np.Song["file"],
+		})
 
 		// Send to play logger (non-blocking — drop if channel is full)
 		if database != nil {
@@ -178,6 +203,42 @@ func main() {
 			slog.Debug("now-playing response write failed", "error", err)
 		}
 	})
+
+	// REST API endpoints (history, digging, stats, artists, search, queue)
+	var dbPool *pgxpool.Pool
+	if database != nil {
+		dbPool = database.Pool
+	}
+	api.RegisterRoutes(mux, api.Deps{
+		DB:         dbPool,
+		Pool:       pool,
+		Config:     cfg,
+		AdminToken: cfg.AdminToken,
+	})
+
+	// WebSocket endpoint — per-stage now-playing broadcasts
+	mux.HandleFunc("GET /ws", wsHub.HandleWS)
+
+	// SSE endpoint — global broadcasts (listener counts, sync updates)
+	mux.HandleFunc("GET /api/events", wsHub.HandleSSE)
+
+	// Listener count broadcaster — sends counts to SSE clients every 10s
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				counts := wsHub.ListenerCounts()
+				wsHub.BroadcastSSE(hub.SSEEvent{
+					Event: "listeners",
+					Data:  counts,
+				})
+			}
+		}
+	}()
 
 	handler := corsMiddleware(mux)
 
