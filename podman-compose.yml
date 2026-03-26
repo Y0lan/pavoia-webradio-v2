@@ -1,0 +1,53 @@
+version: "3"
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: gaende-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: gaende
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gaende_dev}
+      POSTGRES_DB: gaende
+    ports:
+      - "15432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gaende"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: gaende-redis
+    restart: always
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  meilisearch:
+    image: docker.io/getmeili/meilisearch:v1.11
+    container_name: gaende-meilisearch
+    restart: always
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_KEY:-gaende_meili_dev}
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "7700:7700"
+    volumes:
+      - meilidata:/meili_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  meilidata:
