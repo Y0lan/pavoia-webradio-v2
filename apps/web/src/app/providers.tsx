@@ -3,6 +3,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, useEffect, type ReactNode } from "react";
 import { PlayerBar } from "@/components/player-bar";
+import { Sidebar } from "@/components/sidebar";
 import { useWSStore } from "@/lib/ws";
 
 function WSConnector() {
@@ -29,7 +30,8 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <WSConnector />
-      <div className="pb-[72px]">
+      <Sidebar />
+      <div className="min-[900px]:ml-[220px] pb-[72px]">
         {children}
       </div>
       <PlayerBar />

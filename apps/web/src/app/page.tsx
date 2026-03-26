@@ -2,19 +2,9 @@
 
 import { useAudioStore } from "@/lib/audio-engine";
 import { useWSStore } from "@/lib/ws";
+import { STAGES } from "@/lib/stages";
 import { useEffect } from "react";
-
-const STAGES = [
-  { id: "gaende-favorites", name: "Main Stage", genre: "Progressive Melodic Techno", color: "#00ffc8" },
-  { id: "etage-0", name: "Techno Bunker", genre: "Techno", color: "#ff0066" },
-  { id: "ambiance-safe", name: "Ambient Horizon", genre: "Ambient", color: "#00ddff" },
-  { id: "palac-dance", name: "Indie Floor", genre: "Indie Dance", color: "#ffaa00" },
-  { id: "fontanna-laputa", name: "Deep Current", genre: "Deep House", color: "#7b7bff" },
-  { id: "palac-slow-hypno", name: "Chill Terrace", genre: "Chillout", color: "#44ddff" },
-  { id: "bermuda-night", name: "Bass Cave", genre: "DnB", color: "#ff44ff" },
-  { id: "bermuda-day", name: "World Frequencies", genre: "Afro House", color: "#ff4466" },
-  { id: "closing", name: "Live Sets", genre: "Live", color: "#00ff88" },
-];
+import Link from "next/link";
 
 export default function Home() {
   const { playing, stageId, switchStage, play } = useAudioStore();
