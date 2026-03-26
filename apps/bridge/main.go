@@ -220,12 +220,14 @@ func main() {
 	if database != nil {
 		dbPool = database.Pool
 	}
-	api.RegisterRoutes(mux, api.Deps{
+	apiDeps := api.Deps{
 		DB:         dbPool,
 		Pool:       pool,
 		Config:     cfg,
 		AdminToken: cfg.AdminToken,
-	})
+		MPDHost:    cfg.MPDHost,
+	}
+	api.RegisterRoutes(mux, apiDeps)
 
 	// Admin: force artist enrichment
 	if enrichWorker != nil {

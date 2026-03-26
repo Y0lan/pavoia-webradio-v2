@@ -14,6 +14,8 @@ type Deps struct {
 	Pool       *mpdpool.Pool
 	Config     *config.Config
 	AdminToken string
+	MPDHost    string
+	Stream     *StreamHandlers // exposed so main.go can read listener counts
 }
 
 // RegisterRoutes registers all REST API endpoints on the given mux.
@@ -61,4 +63,12 @@ func RegisterRoutes(mux *http.ServeMux, d Deps) {
 
 	// Queue
 	mux.HandleFunc("GET /api/stages/{id}/queue", queue.HandleQueue)
+
+	// Audio stream proxy
+	if d.Stream == nil && d.MPDHost != "" {
+		d.Stream = NewStreamHandlers(d.Config, d.MPDHost)
+	}
+	if d.Stream != nil {
+		mux.HandleFunc("GET /api/stream/{stageId}", d.Stream.HandleStream)
+	}
 }
