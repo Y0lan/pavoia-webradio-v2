@@ -57,10 +57,10 @@ Next.js SSR (:3000) ──► serves frontend, talks to bridge API
 - **WebSocket + SSE dual transport** — WS for per-stage now-playing, SSE for global broadcasts. Fallback to WS-only if proxy blocks SSE.
 - **Stats computed on-request** — fast enough at ~3000 tracks. Add materialized views after ~1M track_plays rows.
 
-## What's Built (Steps 1-3 complete, reviewed)
+## What's Built (Steps 1-4 complete + Step 5 draft)
 
 ### Go Bridge (`apps/bridge/`)
-- `main.go` — HTTP server with graceful shutdown, CORS, health endpoint, stages API
+- `main.go` — HTTP server with graceful shutdown, CORS, health, stages API, hub wiring, API routes
 - `config/config.go` — env-based config, 9 stage definitions (matches Whatbox MPD instances)
 - `mpd/pool.go` — connection pool for 9 MPD instances with:
   - Context-aware watcher goroutines (reuse connections, proper shutdown)
@@ -71,17 +71,41 @@ Next.js SSR (:3000) ──► serves frontend, talks to bridge API
 - `db/migrations/001_initial_schema.sql` — 8 tables (library_tracks, track_plays, artists, artist_relations, plex_sync_log, plex_playlist_snapshots, wrapped_data, user_preferences)
 - `plex/client.go` — Plex API client (playlists, tracks, health with timeout)
 - `plex/sync.go` — sync worker (5min interval, upsert with metadata updates, addedAt extraction)
+- `hub/hub.go` — WebSocket + SSE hub with:
+  - Stage subscription validation, latest-wins backpressure
+  - Snapshot cache (new subscribers get current now-playing)
+  - SSE keepalive (15s), write error detection, newline sanitization
+  - WS OriginPatterns, SetReadLimit(4096), dedicated context
+  - Writer goroutine joined via sync.WaitGroup
+- `hub/handler.go` — WS upgrade + SSE stream handlers
+- `hub/hub_test.go` + `hub/handler_test.go` — 22 tests (13 unit + 9 integration)
+- `api/` — REST API endpoints (30 routes):
+  - `helpers.go` — pagination, time range, admin auth, JSON helpers (10 tests)
+  - `history.go` — play history with filters, calendar heatmap, 7x24 heatmap
+  - `digging.go` — digging calendar, date drill-down, streaks, patterns
+  - `stats.go` — overview, top artists/tracks, stages, BPM, keys, decades, genres, velocity, heatmap
+  - `artists.go` — list, detail, tracks, similar graph
+  - `search.go` — Postgres ILIKE fallback (Meilisearch ready)
+  - `queue.go` — current track from MPD
+  - `routes.go` — central route registration
 
 ### Tested & Verified
 - 9/9 MPD instances connected via SSH tunnel (control ports 6600-6608)
 - Play logging to Postgres working (real tracks from live MPD)
 - Schema migrations with tracking table (safe to add new migrations)
 - 15 eng review findings fixed (watcher lifecycle, graceful shutdown, migration tracking, etc.)
+- Hub: eng review + Codex/Claude outside voice + adversarial review, 17 fixes applied
+- 38 tests total: 22 hub + 10 API helpers + 6 MPD
+
+### Step 5 Known Issues (needs TDD pass)
+- API endpoint handlers lack database integration tests
+- History search filter has argN counter bug
+- Digging streaks algorithm untested
+- Search is Postgres ILIKE only (Meilisearch not wired yet)
 
 ## What's Next (in order)
 
-- **Step 4:** WebSocket hub + SSE endpoints (real-time now-playing broadcasts)
-- **Step 5:** REST API endpoints (history, digging, artists, stats, discovery, search, queue)
+- **Step 5b:** TDD pass on API endpoints (fix bugs, add integration tests)
 - **Step 6:** Artist enrichment pipeline (Last.fm + MusicBrainz)
 - **Step 7:** Audio stream proxy (bridge proxies MPD HTTP streams for CORS)
 - **Step 8:** Next.js frontend — root layout, audio engine, player bar
