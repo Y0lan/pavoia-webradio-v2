@@ -40,11 +40,6 @@ type DiggingHandlers struct {
 // HandleDiggingCalendar serves GET /api/digging/calendar?year=
 // Returns addition counts per day from library_tracks.added_at.
 func (h *DiggingHandlers) HandleDiggingCalendar(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	year := QueryInt(r, "year", time.Now().Year())
 	colorBy := r.URL.Query().Get("color_by") // "", "stage", "genre"
 
@@ -90,6 +85,10 @@ func (h *DiggingHandlers) HandleDiggingCalendar(w http.ResponseWriter, r *http.R
 			}
 			days = append(days, d)
 		}
+		if err := rows.Err(); err != nil {
+			WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+			return
+		}
 		WriteJSON(w, http.StatusOK, map[string]any{"year": year, "color_by": "stage", "days": days})
 		return
 	}
@@ -103,6 +102,10 @@ func (h *DiggingHandlers) HandleDiggingCalendar(w http.ResponseWriter, r *http.R
 		}
 		days = append(days, d)
 	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
+	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{"year": year, "days": days})
 }
@@ -110,11 +113,6 @@ func (h *DiggingHandlers) HandleDiggingCalendar(w http.ResponseWriter, r *http.R
 // HandleDiggingDate serves GET /api/digging/calendar/{date}
 // Returns tracks added on a specific date.
 func (h *DiggingHandlers) HandleDiggingDate(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	dateStr := r.PathValue("date")
 	date, err := time.Parse("2006-01-02", dateStr)
 	if err != nil {
@@ -144,6 +142,10 @@ func (h *DiggingHandlers) HandleDiggingDate(w http.ResponseWriter, r *http.Reque
 		}
 		tracks = append(tracks, t)
 	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
+	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"date":   dateStr,
@@ -155,11 +157,6 @@ func (h *DiggingHandlers) HandleDiggingDate(w http.ResponseWriter, r *http.Reque
 // HandleDiggingStreaks serves GET /api/digging/streaks
 // Computes current streak, longest streak, and best week.
 func (h *DiggingHandlers) HandleDiggingStreaks(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	// Get all distinct dates with additions
 	rows, err := h.DB.Query(r.Context(), `
 		SELECT DISTINCT DATE(added_at)::text
@@ -182,6 +179,10 @@ func (h *DiggingHandlers) HandleDiggingStreaks(w http.ResponseWriter, r *http.Re
 		if t, err := time.Parse("2006-01-02", ds); err == nil {
 			dates = append(dates, t)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
 	}
 
 	streaks := computeStreaks(dates)
@@ -210,6 +211,10 @@ func (h *DiggingHandlers) HandleDiggingStreaks(w http.ResponseWriter, r *http.Re
 			dayCounts = append(dayCounts, dayCount{date: t, count: c})
 		}
 	}
+	if err := countRows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
+	}
 	streaks.BestWeek = computeBestWeek(dayCounts)
 
 	WriteJSON(w, http.StatusOK, streaks)
@@ -218,11 +223,6 @@ func (h *DiggingHandlers) HandleDiggingStreaks(w http.ResponseWriter, r *http.Re
 // HandleDiggingPatterns serves GET /api/digging/patterns
 // Returns day-of-week and hour distributions for additions.
 func (h *DiggingHandlers) HandleDiggingPatterns(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	// Day of week distribution
 	dowRows, err := h.DB.Query(r.Context(), `
 		SELECT EXTRACT(DOW FROM added_at)::int, COUNT(*)
@@ -242,6 +242,10 @@ func (h *DiggingHandlers) HandleDiggingPatterns(w http.ResponseWriter, r *http.R
 			continue
 		}
 		dayOfWeek[dow] = count
+	}
+	if err := dowRows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
 	}
 
 	// Hour distribution
@@ -263,6 +267,10 @@ func (h *DiggingHandlers) HandleDiggingPatterns(w http.ResponseWriter, r *http.R
 			continue
 		}
 		hourOfDay[hour] = count
+	}
+	if err := hourRows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{
@@ -286,7 +294,7 @@ func computeStreaks(dates []time.Time) DiggingStreaks {
 	longest, current := 1, 1
 	for i := 1; i < len(dates); i++ {
 		diff := dates[i].Sub(dates[i-1]).Hours() / 24
-		if diff <= 1.5 { // consecutive days (allow for timezone drift)
+		if diff <= 1.08 { // consecutive days (26 hours for timezone drift)
 			current++
 		} else {
 			current = 1
@@ -305,7 +313,7 @@ func computeStreaks(dates []time.Time) DiggingStreaks {
 			dayDiff = 0
 		}
 		expectedDiff := float64(len(dates) - 1 - i)
-		if dayDiff-expectedDiff > 1.5 {
+		if dayDiff-expectedDiff > 1.08 {
 			break
 		}
 		s.Current++

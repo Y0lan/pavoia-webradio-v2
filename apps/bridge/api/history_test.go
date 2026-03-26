@@ -7,45 +7,13 @@ import (
 	"testing"
 )
 
-func TestHandleHistory_NoDB(t *testing.T) {
-	h := &HistoryHandlers{DB: nil}
+func TestRequireDB_RejectsNilDB(t *testing.T) {
+	handler := RequireDB(nil, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/history", nil)
-	h.HandleHistory(w, r)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", w.Code)
-	}
-}
-
-func TestHandleHistoryCalendar_NoDB(t *testing.T) {
-	h := &HistoryHandlers{DB: nil}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/history/calendar", nil)
-	h.HandleHistoryCalendar(w, r)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", w.Code)
-	}
-}
-
-func TestHandleHistoryHeatmap_NoDB(t *testing.T) {
-	h := &HistoryHandlers{DB: nil}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/history/heatmap", nil)
-	h.HandleHistoryHeatmap(w, r)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", w.Code)
-	}
-}
-
-func TestHandleHistoryByID_NoDB(t *testing.T) {
-	h := &HistoryHandlers{DB: nil}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/history/123", nil)
-	r.SetPathValue("id", "123")
-	h.HandleHistoryByID(w, r)
+	r := httptest.NewRequest("GET", "/test", nil)
+	handler(w, r)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", w.Code)
@@ -59,26 +27,12 @@ func TestHandleHistoryByID_InvalidID(t *testing.T) {
 	r.SetPathValue("id", "abc")
 	h.HandleHistoryByID(w, r)
 
-	// Invalid ID should return 400 before checking DB
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid ID, got %d", w.Code)
 	}
 }
 
-func TestHandleStageHistory_NoDB(t *testing.T) {
-	h := &HistoryHandlers{DB: nil}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/stages/gaende-favorites/history", nil)
-	r.SetPathValue("id", "gaende-favorites")
-	h.HandleStageHistory(w, r)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", w.Code)
-	}
-}
-
 func TestHistoryEntry_JSON(t *testing.T) {
-	// Verify the JSON serialization format
 	e := HistoryEntry{
 		ID:       1,
 		StageID:  "gaende-favorites",
@@ -97,8 +51,27 @@ func TestHistoryEntry_JSON(t *testing.T) {
 	if m["stage_id"] != "gaende-favorites" {
 		t.Errorf("expected stage_id gaende-favorites, got %v", m["stage_id"])
 	}
-	// file_path should be omitted when empty
-	if _, ok := m["file_path"]; ok && m["file_path"] != "" {
-		t.Errorf("expected file_path to be empty or omitted, got %v", m["file_path"])
+}
+
+func TestQueryIntBounded(t *testing.T) {
+	tests := []struct {
+		query    string
+		min, max int
+		expected int
+	}{
+		{"limit=25", 1, 100, 25},
+		{"limit=-5", 1, 100, 1},   // below min → clamped
+		{"limit=999", 1, 100, 100}, // above max → clamped
+		{"limit=1", 1, 100, 1},    // at min
+		{"limit=100", 1, 100, 100}, // at max
+		{"", 1, 100, 20},           // default
+	}
+
+	for _, tt := range tests {
+		r := httptest.NewRequest("GET", "/?"+tt.query, nil)
+		v := QueryIntBounded(r, "limit", 20, tt.min, tt.max)
+		if v != tt.expected {
+			t.Errorf("query=%q: got %d, want %d", tt.query, v, tt.expected)
+		}
 	}
 }

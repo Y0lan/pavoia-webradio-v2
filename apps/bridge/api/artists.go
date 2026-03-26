@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -56,11 +57,6 @@ type ArtistsHandlers struct {
 
 // HandleArtistsList serves GET /api/artists
 func (h *ArtistsHandlers) HandleArtistsList(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	pg := ParsePagination(r)
 	q := r.URL.Query()
 
@@ -81,7 +77,11 @@ func (h *ArtistsHandlers) HandleArtistsList(w http.ResponseWriter, r *http.Reque
 	// Count
 	var total int
 	countQ := "SELECT COUNT(*) FROM artists a " + where
-	h.DB.QueryRow(r.Context(), countQ, args...).Scan(&total)
+	if err := h.DB.QueryRow(r.Context(), countQ, args...).Scan(&total); err != nil {
+		slog.Warn("artists: count query failed", "error", err)
+		WriteError(w, http.StatusInternalServerError, "count query failed")
+		return
+	}
 
 	// Sort
 	orderBy := "ORDER BY track_count DESC"
@@ -92,11 +92,17 @@ func (h *ArtistsHandlers) HandleArtistsList(w http.ResponseWriter, r *http.Reque
 		orderBy = "ORDER BY play_count DESC"
 	}
 
-	// Query with track counts from library_tracks
+	// Query with LEFT JOIN for track_count and subquery for play_count
 	dataQ := fmt.Sprintf(`
 		SELECT a.id, a.name, a.country, a.image_url, a.tags,
-			(SELECT COUNT(*) FROM library_tracks lt WHERE lt.artist_id = a.id) as track_count
+			COALESCE(tc.track_count, 0) as track_count,
+			(SELECT COUNT(*) FROM track_plays tp WHERE lower(tp.artist) = lower(a.name)) as play_count
 		FROM artists a
+		LEFT JOIN (
+			SELECT artist_id, COUNT(*) as track_count
+			FROM library_tracks
+			GROUP BY artist_id
+		) tc ON tc.artist_id = a.id
 		%s %s
 		LIMIT %d OFFSET %d
 	`, where, orderBy, pg.PerPage, pg.Offset)
@@ -111,13 +117,20 @@ func (h *ArtistsHandlers) HandleArtistsList(w http.ResponseWriter, r *http.Reque
 	artists := make([]ArtistSummary, 0)
 	for rows.Next() {
 		var a ArtistSummary
-		if err := rows.Scan(&a.ID, &a.Name, &a.Country, &a.ImageURL, &a.Tags, &a.TrackCount); err != nil {
+		var playCount int
+		if err := rows.Scan(&a.ID, &a.Name, &a.Country, &a.ImageURL, &a.Tags, &a.TrackCount, &playCount); err != nil {
+			slog.Warn("artists: scan error", "error", err)
 			continue
 		}
 		if a.Tags == nil {
 			a.Tags = []string{}
 		}
 		artists = append(artists, a)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("artists: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query iteration failed")
+		return
 	}
 
 	WritePaged(w, artists, pg, total)
@@ -128,11 +141,6 @@ func (h *ArtistsHandlers) HandleArtistDetail(w http.ResponseWriter, r *http.Requ
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
 
@@ -161,11 +169,6 @@ func (h *ArtistsHandlers) HandleArtistDetail(w http.ResponseWriter, r *http.Requ
 
 // HandleArtistTracks serves GET /api/artists/{id}/tracks
 func (h *ArtistsHandlers) HandleArtistTracks(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid id")
@@ -175,7 +178,11 @@ func (h *ArtistsHandlers) HandleArtistTracks(w http.ResponseWriter, r *http.Requ
 	pg := ParsePagination(r)
 
 	var total int
-	h.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM library_tracks WHERE artist_id = $1", id).Scan(&total)
+	if err := h.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM library_tracks WHERE artist_id = $1", id).Scan(&total); err != nil {
+		slog.Warn("artist tracks: count query failed", "error", err)
+		WriteError(w, http.StatusInternalServerError, "count query failed")
+		return
+	}
 
 	rows, queryErr := h.DB.Query(r.Context(), `
 		SELECT id, title, COALESCE(album, ''), COALESCE(stage_id, ''),
@@ -194,9 +201,15 @@ func (h *ArtistsHandlers) HandleArtistTracks(w http.ResponseWriter, r *http.Requ
 	for rows.Next() {
 		var t ArtistTrack
 		if err := rows.Scan(&t.ID, &t.Title, &t.Album, &t.StageID, &t.Genre, &t.BPM, &t.Year, &t.AddedAt); err != nil {
+			slog.Warn("artist tracks: scan error", "error", err)
 			continue
 		}
 		tracks = append(tracks, t)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("artist tracks: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query iteration failed")
+		return
 	}
 
 	WritePaged(w, tracks, pg, total)
@@ -204,11 +217,6 @@ func (h *ArtistsHandlers) HandleArtistTracks(w http.ResponseWriter, r *http.Requ
 
 // HandleArtistSimilar serves GET /api/artists/{id}/similar
 func (h *ArtistsHandlers) HandleArtistSimilar(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid id")
@@ -248,9 +256,15 @@ func (h *ArtistsHandlers) HandleArtistSimilar(w http.ResponseWriter, r *http.Req
 	for rows.Next() {
 		var s similar
 		if err := rows.Scan(&s.ID, &s.Name, &s.Country, &s.ImageURL, &s.Weight); err != nil {
+			slog.Warn("artist similar: scan error", "error", err)
 			continue
 		}
 		results = append(results, s)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("artist similar: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query iteration failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, results)

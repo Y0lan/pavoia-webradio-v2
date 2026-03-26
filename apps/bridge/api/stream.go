@@ -71,10 +71,10 @@ func (h *StreamHandlers) HandleStream(w http.ResponseWriter, r *http.Request) {
 	// Track listener
 	counter := h.getCounter(stageID)
 	counter.Add(1)
-	defer counter.Add(-1)
 
 	slog.Info("stream: listener connected", "stage", stageID, "listeners", counter.Load())
 	defer func() {
+		counter.Add(-1)
 		slog.Info("stream: listener disconnected", "stage", stageID, "listeners", counter.Load())
 	}()
 
@@ -87,11 +87,12 @@ func (h *StreamHandlers) HandleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")     // Nginx: don't buffer
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Transfer-Encoding", "chunked")
 
 	// Stream the audio — blocks until client disconnects or upstream closes
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, resp.Body)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		slog.Warn("stream: io.Copy error", "stage", stageID, "error", err)
+	}
 }
 
 // ListenerCounts returns the current listener count per stage.

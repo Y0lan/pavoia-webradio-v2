@@ -40,11 +40,6 @@ type HistoryHandlers struct {
 
 // HandleHistory serves GET /api/history with filters and pagination.
 func (h *HistoryHandlers) HandleHistory(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	pg := ParsePagination(r)
 	tr := ParseTimeRange(r)
 	q := r.URL.Query()
@@ -122,6 +117,10 @@ func (h *HistoryHandlers) HandleHistory(w http.ResponseWriter, r *http.Request) 
 		}
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
+	}
 
 	WritePaged(w, entries, pg, total)
 }
@@ -129,11 +128,6 @@ func (h *HistoryHandlers) HandleHistory(w http.ResponseWriter, r *http.Request) 
 // HandleHistoryCalendar serves GET /api/history/calendar?year=
 // Returns play counts per day for a GitHub-style heatmap.
 func (h *HistoryHandlers) HandleHistoryCalendar(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	year := QueryInt(r, "year", time.Now().Year())
 
 	rows, err := h.DB.Query(r.Context(), `
@@ -158,6 +152,10 @@ func (h *HistoryHandlers) HandleHistoryCalendar(w http.ResponseWriter, r *http.R
 		}
 		days = append(days, d)
 	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
+	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{"year": year, "days": days})
 }
@@ -165,11 +163,6 @@ func (h *HistoryHandlers) HandleHistoryCalendar(w http.ResponseWriter, r *http.R
 // HandleHistoryHeatmap serves GET /api/history/heatmap
 // Returns a 7x24 grid of play counts (day_of_week x hour).
 func (h *HistoryHandlers) HandleHistoryHeatmap(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	query := `
 		SELECT EXTRACT(DOW FROM played_at)::int, EXTRACT(HOUR FROM played_at)::int, COUNT(*)
 		FROM track_plays
@@ -197,6 +190,10 @@ func (h *HistoryHandlers) HandleHistoryHeatmap(w http.ResponseWriter, r *http.Re
 		}
 		cells = append(cells, c)
 	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
+	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{"cells": cells})
 }
@@ -204,11 +201,6 @@ func (h *HistoryHandlers) HandleHistoryHeatmap(w http.ResponseWriter, r *http.Re
 // HandleStageHistory serves GET /api/stages/{id}/history
 // Shortcut for history filtered by a single stage.
 func (h *HistoryHandlers) HandleStageHistory(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	stageID := r.PathValue("id")
 	pg := ParsePagination(r)
 
@@ -241,6 +233,10 @@ func (h *HistoryHandlers) HandleStageHistory(w http.ResponseWriter, r *http.Requ
 		}
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		return
+	}
 
 	WritePaged(w, entries, pg, total)
 }
@@ -251,11 +247,6 @@ func (h *HistoryHandlers) HandleHistoryByID(w http.ResponseWriter, r *http.Reque
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
 

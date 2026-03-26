@@ -7,10 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strings"
 	"time"
 )
 
 const mbBaseURL = "https://musicbrainz.org/ws/2/"
+
+var mbidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // MBClient calls the MusicBrainz API for artist enrichment.
 type MBClient struct {
@@ -37,8 +41,9 @@ type MBArtist struct {
 
 // SearchArtist searches MusicBrainz for an artist by name and returns the best match.
 func (c *MBClient) SearchArtist(ctx context.Context, name string) (*MBArtist, error) {
+	escapedName := strings.ReplaceAll(name, `"`, `\"`)
 	params := url.Values{
-		"query": {fmt.Sprintf(`artist:"%s"`, name)},
+		"query": {fmt.Sprintf(`artist:"%s"`, escapedName)},
 		"fmt":   {"json"},
 		"limit": {"1"},
 	}
@@ -84,6 +89,10 @@ func (c *MBClient) SearchArtist(ctx context.Context, name string) (*MBArtist, er
 
 // LookupArtist fetches an artist by MBID (more reliable than search).
 func (c *MBClient) LookupArtist(ctx context.Context, mbid string) (*MBArtist, error) {
+	if !mbidPattern.MatchString(mbid) {
+		return nil, fmt.Errorf("musicbrainz: invalid MBID format: %s", mbid)
+	}
+
 	params := url.Values{
 		"fmt": {"json"},
 	}
@@ -136,7 +145,7 @@ func (c *MBClient) get(ctx context.Context, path string, params url.Values) ([]b
 		return nil, fmt.Errorf("musicbrainz: HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, fmt.Errorf("musicbrainz: read body: %w", err)
 	}

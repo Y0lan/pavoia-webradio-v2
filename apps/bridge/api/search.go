@@ -22,11 +22,6 @@ func (h *SearchHandlers) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	limit := QueryInt(r, "limit", 20)
 	if limit > 100 {
 		limit = 100
@@ -49,7 +44,6 @@ func (h *SearchHandlers) HandleSearch(w http.ResponseWriter, r *http.Request) {
 			LIMIT $2
 		`, pattern, limit)
 		if err == nil {
-			defer rows.Close()
 			type trackResult struct {
 				ID      int64  `json:"id"`
 				Title   string `json:"title"`
@@ -64,6 +58,12 @@ func (h *SearchHandlers) HandleSearch(w http.ResponseWriter, r *http.Request) {
 				rows.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.StageID, &t.Genre)
 				tracks = append(tracks, t)
 			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+				return
+			}
+			rows.Close()
 			result["tracks"] = tracks
 		}
 	}
@@ -90,6 +90,10 @@ func (h *SearchHandlers) HandleSearch(w http.ResponseWriter, r *http.Request) {
 				var a artistResult
 				rows.Scan(&a.ID, &a.Name, &a.Country, &a.ImageURL)
 				artists = append(artists, a)
+			}
+			if err := rows.Err(); err != nil {
+				WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+				return
 			}
 			result["artists"] = artists
 		}

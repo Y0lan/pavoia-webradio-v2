@@ -1,11 +1,14 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Pagination holds parsed page/per_page values.
@@ -96,6 +99,7 @@ func WritePaged(w http.ResponseWriter, data any, pg Pagination, total int) {
 }
 
 // AdminAuth middleware checks the Authorization header against the admin token.
+// Uses constant-time comparison to prevent timing side-channel attacks.
 func AdminAuth(token string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if token == "" {
@@ -103,8 +107,20 @@ func AdminAuth(token string, next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		auth := r.Header.Get("Authorization")
-		if auth != "Bearer "+token {
+		expected := "Bearer " + token
+		if subtle.ConstantTimeCompare([]byte(auth), []byte(expected)) != 1 {
 			WriteError(w, http.StatusUnauthorized, "invalid admin token")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// RequireDB middleware rejects requests with 503 when the database is unavailable.
+func RequireDB(db *pgxpool.Pool, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			WriteError(w, http.StatusServiceUnavailable, "database not available")
 			return
 		}
 		next(w, r)
@@ -119,4 +135,16 @@ func QueryInt(r *http.Request, key string, defaultVal int) int {
 		}
 	}
 	return defaultVal
+}
+
+// QueryIntBounded returns an int query param clamped to [min, max].
+func QueryIntBounded(r *http.Request, key string, defaultVal, min, max int) int {
+	n := QueryInt(r, key, defaultVal)
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
 }

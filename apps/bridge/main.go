@@ -277,8 +277,10 @@ func main() {
 		Handler: handler,
 	}
 
-	// Graceful shutdown — no os.Exit, let defers run
+	// Graceful shutdown — blocks main() until drain is complete
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
@@ -304,6 +306,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Wait for shutdown goroutine to finish draining before main() exits
+	<-shutdownDone
 	slog.Info("bridge stopped")
 }
 

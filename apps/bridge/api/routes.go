@@ -27,39 +27,42 @@ func RegisterRoutes(mux *http.ServeMux, d Deps) {
 	search := &SearchHandlers{DB: d.DB}
 	queue := &QueueHandlers{Pool: d.Pool, Config: d.Config}
 
+	// RequireDB wraps handlers that need a database connection.
+	rdb := func(h http.HandlerFunc) http.HandlerFunc {
+		return RequireDB(d.DB, h)
+	}
+
 	// History
-	mux.HandleFunc("GET /api/history", history.HandleHistory)
-	mux.HandleFunc("GET /api/history/{id}", history.HandleHistoryByID)
-	mux.HandleFunc("GET /api/history/calendar", history.HandleHistoryCalendar)
-	mux.HandleFunc("GET /api/history/heatmap", history.HandleHistoryHeatmap)
-	mux.HandleFunc("GET /api/stages/{id}/history", history.HandleStageHistory)
+	mux.HandleFunc("GET /api/history", rdb(history.HandleHistory))
+	mux.HandleFunc("GET /api/history/{id}", history.HandleHistoryByID) // validates ID first
+	mux.HandleFunc("GET /api/history/calendar", rdb(history.HandleHistoryCalendar))
+	mux.HandleFunc("GET /api/history/heatmap", rdb(history.HandleHistoryHeatmap))
+	mux.HandleFunc("GET /api/stages/{id}/history", rdb(history.HandleStageHistory))
 
 	// Digging
-	mux.HandleFunc("GET /api/digging/calendar", digging.HandleDiggingCalendar)
-	mux.HandleFunc("GET /api/digging/calendar/{date}", digging.HandleDiggingDate)
-	mux.HandleFunc("GET /api/digging/streaks", digging.HandleDiggingStreaks)
-	mux.HandleFunc("GET /api/digging/patterns", digging.HandleDiggingPatterns)
+	mux.HandleFunc("GET /api/digging/calendar", rdb(digging.HandleDiggingCalendar))
+	mux.HandleFunc("GET /api/digging/calendar/{date}", rdb(digging.HandleDiggingDate))
+	mux.HandleFunc("GET /api/digging/streaks", rdb(digging.HandleDiggingStreaks))
+	mux.HandleFunc("GET /api/digging/patterns", rdb(digging.HandleDiggingPatterns))
 
 	// Stats
-	mux.HandleFunc("GET /api/stats/overview", stats.HandleStatsOverview)
-	mux.HandleFunc("GET /api/stats/top-artists", stats.HandleStatsTopArtists)
-	mux.HandleFunc("GET /api/stats/top-tracks", stats.HandleStatsTopTracks)
-	mux.HandleFunc("GET /api/stats/stages", stats.HandleStatsStages)
-	mux.HandleFunc("GET /api/stats/bpm", stats.HandleStatsBPM)
-	mux.HandleFunc("GET /api/stats/keys", stats.HandleStatsKeys)
-	mux.HandleFunc("GET /api/stats/decades", stats.HandleStatsDecades)
-	mux.HandleFunc("GET /api/stats/genres", stats.HandleStatsGenres)
-	mux.HandleFunc("GET /api/stats/discovery-velocity", stats.HandleStatsDiscoveryVelocity)
-	mux.HandleFunc("GET /api/stats/listening-heatmap", stats.HandleStatsListeningHeatmap)
+	mux.HandleFunc("GET /api/stats/overview", rdb(stats.HandleStatsOverview))
+	mux.HandleFunc("GET /api/stats/top-artists", rdb(stats.HandleStatsTopArtists))
+	mux.HandleFunc("GET /api/stats/top-tracks", rdb(stats.HandleStatsTopTracks))
+	mux.HandleFunc("GET /api/stats/stages", rdb(stats.HandleStatsStages))
+	mux.HandleFunc("GET /api/stats/bpm", rdb(stats.HandleStatsBPM))
+	mux.HandleFunc("GET /api/stats/keys", rdb(stats.HandleStatsKeys))
+	mux.HandleFunc("GET /api/stats/decades", rdb(stats.HandleStatsDecades))
+	mux.HandleFunc("GET /api/stats/genres", rdb(stats.HandleStatsGenres))
+	mux.HandleFunc("GET /api/stats/discovery-velocity", rdb(stats.HandleStatsDiscoveryVelocity))
+	mux.HandleFunc("GET /api/stats/listening-heatmap", rdb(stats.HandleStatsListeningHeatmap))
 
 	// Artists
-	mux.HandleFunc("GET /api/artists", artists.HandleArtistsList)
-	mux.HandleFunc("GET /api/artists/{id}", artists.HandleArtistDetail)
-	mux.HandleFunc("GET /api/artists/{id}/tracks", artists.HandleArtistTracks)
-	mux.HandleFunc("GET /api/artists/{id}/similar", artists.HandleArtistSimilar)
-
-	// Search
-	mux.HandleFunc("GET /api/search", search.HandleSearch)
+	mux.HandleFunc("GET /api/artists", rdb(artists.HandleArtistsList))
+	mux.HandleFunc("GET /api/artists/{id}", artists.HandleArtistDetail)   // validates ID first
+	mux.HandleFunc("GET /api/artists/{id}/tracks", artists.HandleArtistTracks) // validates ID first
+	mux.HandleFunc("GET /api/artists/{id}/similar", artists.HandleArtistSimilar) // validates ID first
+	mux.HandleFunc("GET /api/search", search.HandleSearch) // validates q param first
 
 	// Queue
 	mux.HandleFunc("GET /api/stages/{id}/queue", queue.HandleQueue)

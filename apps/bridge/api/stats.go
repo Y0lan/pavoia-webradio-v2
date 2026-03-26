@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -15,24 +16,38 @@ type StatsHandlers struct {
 
 // HandleStatsOverview serves GET /api/stats/overview
 func (h *StatsHandlers) HandleStatsOverview(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
+	weekAgo := time.Now().AddDate(0, 0, -7)
+
+	// Combine library_tracks stats into a single query.
+	var totalTracks, totalArtists, weekAdded int
+	err := h.DB.QueryRow(r.Context(), `
+		SELECT
+			COUNT(*),
+			COUNT(DISTINCT lower(artist)),
+			COUNT(*) FILTER (WHERE added_at >= $1)
+		FROM library_tracks
+	`, weekAgo).Scan(&totalTracks, &totalArtists, &weekAdded)
+	if err != nil {
+		slog.Warn("stats overview: library_tracks query failed", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
 
-	var totalTracks, totalArtists, totalPlays int
+	// Combine track_plays stats into a single query.
+	var totalPlays, weekPlays int
 	var totalHours float64
-
-	h.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM library_tracks").Scan(&totalTracks)
-	h.DB.QueryRow(r.Context(), "SELECT COUNT(DISTINCT lower(artist)) FROM library_tracks").Scan(&totalArtists)
-	h.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM track_plays").Scan(&totalPlays)
-	h.DB.QueryRow(r.Context(), "SELECT COALESCE(SUM(duration_sec)/3600.0, 0) FROM track_plays").Scan(&totalHours)
-
-	// This week's additions and plays
-	weekAgo := time.Now().AddDate(0, 0, -7)
-	var weekAdded, weekPlays int
-	h.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM library_tracks WHERE added_at >= $1", weekAgo).Scan(&weekAdded)
-	h.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM track_plays WHERE played_at >= $1", weekAgo).Scan(&weekPlays)
+	err = h.DB.QueryRow(r.Context(), `
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(duration_sec)/3600.0, 0),
+			COUNT(*) FILTER (WHERE played_at >= $1)
+		FROM track_plays
+	`, weekAgo).Scan(&totalPlays, &totalHours, &weekPlays)
+	if err != nil {
+		slog.Warn("stats overview: track_plays query failed", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"total_tracks":  totalTracks,
@@ -46,15 +61,7 @@ func (h *StatsHandlers) HandleStatsOverview(w http.ResponseWriter, r *http.Reque
 
 // HandleStatsTopArtists serves GET /api/stats/top-artists?by=plays|tracks&limit=&stage=&period=
 func (h *StatsHandlers) HandleStatsTopArtists(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
-	limit := QueryInt(r, "limit", 20)
-	if limit > 100 {
-		limit = 100
-	}
+	limit := QueryIntBounded(r, "limit", 20, 1, 100)
 	by := r.URL.Query().Get("by")
 	stage := r.URL.Query().Get("stage")
 	period := r.URL.Query().Get("period")
@@ -80,7 +87,12 @@ func (h *StatsHandlers) HandleStatsTopArtists(w http.ResponseWriter, r *http.Req
 			since = time.Now().AddDate(-1, 0, 0)
 		}
 		if !since.IsZero() {
-			where += " AND played_at >= " + nextArg()
+			switch by {
+			case "tracks":
+				where += " AND added_at >= " + nextArg()
+			default:
+				where += " AND played_at >= " + nextArg()
+			}
 			args = append(args, since)
 		}
 	}
@@ -115,9 +127,15 @@ func (h *StatsHandlers) HandleStatsTopArtists(w http.ResponseWriter, r *http.Req
 	for rows.Next() {
 		var e entry
 		if err := rows.Scan(&e.Artist, &e.Count); err != nil {
+			slog.Warn("stats top artists: scan failed", "error", err)
 			continue
 		}
 		results = append(results, e)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("stats top artists: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, results)
@@ -125,15 +143,7 @@ func (h *StatsHandlers) HandleStatsTopArtists(w http.ResponseWriter, r *http.Req
 
 // HandleStatsTopTracks serves GET /api/stats/top-tracks?limit=&stage=&period=
 func (h *StatsHandlers) HandleStatsTopTracks(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
-	limit := QueryInt(r, "limit", 20)
-	if limit > 100 {
-		limit = 100
-	}
+	limit := QueryIntBounded(r, "limit", 20, 1, 100)
 	stage := r.URL.Query().Get("stage")
 	period := r.URL.Query().Get("period")
 
@@ -184,9 +194,15 @@ func (h *StatsHandlers) HandleStatsTopTracks(w http.ResponseWriter, r *http.Requ
 	for rows.Next() {
 		var e entry
 		if err := rows.Scan(&e.Title, &e.Artist, &e.Plays); err != nil {
+			slog.Warn("stats top tracks: scan failed", "error", err)
 			continue
 		}
 		results = append(results, e)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("stats top tracks: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, results)
@@ -194,11 +210,6 @@ func (h *StatsHandlers) HandleStatsTopTracks(w http.ResponseWriter, r *http.Requ
 
 // HandleStatsStages serves GET /api/stats/stages
 func (h *StatsHandlers) HandleStatsStages(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	rows, err := h.DB.Query(r.Context(), `
 		SELECT stage_id, COUNT(*) as plays,
 			COUNT(DISTINCT artist) as unique_artists,
@@ -224,9 +235,15 @@ func (h *StatsHandlers) HandleStatsStages(w http.ResponseWriter, r *http.Request
 	for rows.Next() {
 		var s stageStat
 		if err := rows.Scan(&s.StageID, &s.Plays, &s.UniqueArtists, &s.AvgBPM); err != nil {
+			slog.Warn("stats stages: scan failed", "error", err)
 			continue
 		}
 		results = append(results, s)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("stats stages: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, results)
@@ -234,11 +251,6 @@ func (h *StatsHandlers) HandleStatsStages(w http.ResponseWriter, r *http.Request
 
 // HandleStatsBPM serves GET /api/stats/bpm?stage=
 func (h *StatsHandlers) HandleStatsBPM(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	query := `SELECT bpm, COUNT(*) FROM library_tracks WHERE bpm IS NOT NULL AND bpm > 0`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
@@ -262,9 +274,15 @@ func (h *StatsHandlers) HandleStatsBPM(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var b bin
 		if err := rows.Scan(&b.BPM, &b.Count); err != nil {
+			slog.Warn("stats bpm: scan failed", "error", err)
 			continue
 		}
 		bins = append(bins, b)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("stats bpm: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, bins)
@@ -272,11 +290,6 @@ func (h *StatsHandlers) HandleStatsBPM(w http.ResponseWriter, r *http.Request) {
 
 // HandleStatsKeys serves GET /api/stats/keys?stage=
 func (h *StatsHandlers) HandleStatsKeys(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	query := `SELECT camelot_key, COUNT(*) FROM library_tracks WHERE camelot_key IS NOT NULL`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
@@ -300,9 +313,15 @@ func (h *StatsHandlers) HandleStatsKeys(w http.ResponseWriter, r *http.Request) 
 	for rows.Next() {
 		var k keyCount
 		if err := rows.Scan(&k.Key, &k.Count); err != nil {
+			slog.Warn("stats keys: scan failed", "error", err)
 			continue
 		}
 		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("stats keys: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, keys)
@@ -310,11 +329,6 @@ func (h *StatsHandlers) HandleStatsKeys(w http.ResponseWriter, r *http.Request) 
 
 // HandleStatsDecades serves GET /api/stats/decades?stage=
 func (h *StatsHandlers) HandleStatsDecades(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	query := `SELECT (year/10)*10 as decade, COUNT(*) FROM library_tracks WHERE year IS NOT NULL AND year > 0`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
@@ -338,9 +352,15 @@ func (h *StatsHandlers) HandleStatsDecades(w http.ResponseWriter, r *http.Reques
 	for rows.Next() {
 		var d decadeCount
 		if err := rows.Scan(&d.Decade, &d.Count); err != nil {
+			slog.Warn("stats decades: scan failed", "error", err)
 			continue
 		}
 		decades = append(decades, d)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("stats decades: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, decades)
@@ -348,11 +368,6 @@ func (h *StatsHandlers) HandleStatsDecades(w http.ResponseWriter, r *http.Reques
 
 // HandleStatsGenres serves GET /api/stats/genres?stage=
 func (h *StatsHandlers) HandleStatsGenres(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	query := `SELECT genre, COUNT(*) FROM library_tracks WHERE genre IS NOT NULL AND genre != ''`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
@@ -376,9 +391,15 @@ func (h *StatsHandlers) HandleStatsGenres(w http.ResponseWriter, r *http.Request
 	for rows.Next() {
 		var g genreCount
 		if err := rows.Scan(&g.Genre, &g.Count); err != nil {
+			slog.Warn("stats genres: scan failed", "error", err)
 			continue
 		}
 		genres = append(genres, g)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("stats genres: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, genres)
@@ -387,11 +408,6 @@ func (h *StatsHandlers) HandleStatsGenres(w http.ResponseWriter, r *http.Request
 // HandleStatsDiscoveryVelocity serves GET /api/stats/discovery-velocity
 // Returns tracks added per week for the last 52 weeks.
 func (h *StatsHandlers) HandleStatsDiscoveryVelocity(w http.ResponseWriter, r *http.Request) {
-	if h.DB == nil {
-		WriteError(w, http.StatusServiceUnavailable, "database not available")
-		return
-	}
-
 	rows, err := h.DB.Query(r.Context(), `
 		SELECT DATE_TRUNC('week', added_at)::date::text, COUNT(*)
 		FROM library_tracks
@@ -413,9 +429,15 @@ func (h *StatsHandlers) HandleStatsDiscoveryVelocity(w http.ResponseWriter, r *h
 	for rows.Next() {
 		var wc weekCount
 		if err := rows.Scan(&wc.Week, &wc.Count); err != nil {
+			slog.Warn("stats discovery velocity: scan failed", "error", err)
 			continue
 		}
 		weeks = append(weeks, wc)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("stats discovery velocity: rows iteration error", "error", err)
+		WriteError(w, http.StatusInternalServerError, "query failed")
+		return
 	}
 
 	WriteJSON(w, http.StatusOK, weeks)
