@@ -17,6 +17,7 @@ import (
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/api"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/config"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/db"
+	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/enrichment"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/hub"
 	mpdpool "github.com/Y0lan/pavoia-webradio-v2/apps/bridge/mpd"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/plex"
@@ -122,6 +123,16 @@ func main() {
 		slog.Info("plex not configured — skipping sync")
 	}
 
+	// Artist enrichment worker (Last.fm + MusicBrainz)
+	var enrichWorker *enrichment.Worker
+	if cfg.LastFMKey != "" && database != nil {
+		enrichWorker = enrichment.NewWorker(database.Pool, cfg.LastFMKey, 30*time.Minute)
+		enrichWorker.Start(ctx)
+		slog.Info("enrichment worker started", "interval", "30m")
+	} else {
+		slog.Info("enrichment not configured — skipping (need LASTFM_KEY + database)")
+	}
+
 	// Cache visible stages (config never changes at runtime)
 	visibleStages := cfg.VisibleStages()
 
@@ -215,6 +226,23 @@ func main() {
 		Config:     cfg,
 		AdminToken: cfg.AdminToken,
 	})
+
+	// Admin: force artist enrichment
+	if enrichWorker != nil {
+		mux.HandleFunc("POST /api/artists/{id}/enrich", api.AdminAuth(cfg.AdminToken, func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			var artistID int64
+			if _, err := fmt.Sscanf(id, "%d", &artistID); err != nil {
+				api.WriteError(w, http.StatusBadRequest, "invalid artist id")
+				return
+			}
+			if err := enrichWorker.EnrichArtist(r.Context(), artistID); err != nil {
+				api.WriteError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			api.WriteJSON(w, http.StatusOK, map[string]string{"status": "enriched"})
+		}))
+	}
 
 	// WebSocket endpoint — per-stage now-playing broadcasts
 	mux.HandleFunc("GET /ws", wsHub.HandleWS)
