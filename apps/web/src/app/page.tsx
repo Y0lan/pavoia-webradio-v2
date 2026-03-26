@@ -30,14 +30,14 @@ export default function Home() {
           className="font-[family-name:var(--font-display)] text-3xl font-bold tracking-[0.02em]"
           style={{ color: "var(--color-text-primary)" }}
         >
-          GAENDE
+          Pavoia Webradio
         </h1>
         <div className="flex items-center gap-2 mt-1">
           <span
             className="font-[family-name:var(--font-terminal)] text-[11px] tracking-[0.25em] uppercase"
             style={{ color: "var(--color-accent)" }}
           >
-            // STAGES
+            // 9 STAGES
           </span>
           <div
             className="flex-1 h-px"
@@ -83,19 +83,12 @@ export default function Home() {
                 </span>
               </div>
 
-              {/* Genre */}
-              <span
-                className="font-[family-name:var(--font-terminal)] text-[10px] tracking-[0.08em] uppercase"
-                style={{
-                  color: stage.color,
-                  background: `${stage.color}10`,
-                  border: `1px solid ${stage.color}20`,
-                  padding: "2px 8px",
-                  display: "inline-block",
-                }}
-              >
-                {stage.genre}
-              </span>
+              {/* Icon + description */}
+              <div className="font-[family-name:var(--font-mono)] text-[11px] leading-relaxed"
+                style={{ color: "var(--color-text-secondary)" }}>
+                <span className="mr-1">{stage.icon}</span>
+                {stage.desc}
+              </div>
 
               {/* Now playing */}
               <div className="mt-3">

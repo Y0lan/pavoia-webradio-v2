@@ -17,44 +17,61 @@ export default function AboutPage() {
           <div className="flex-1 h-px" style={{ background: "linear-gradient(90deg, var(--color-accent-dim), transparent)" }} />
         </div>
 
+        {/* Pavoia logo */}
+        <img
+          src="https://pavoia.com/wp-content/uploads/2022/10/PavoiaKV_Homebutton_300px.gif"
+          alt="PAVOIA"
+          className="w-[120px] md:w-[260px] h-auto mb-4"
+        />
+
         {/* Title */}
-        <h1 className="font-[family-name:var(--font-display)] text-[64px] font-extrabold tracking-[0.4em] mb-4"
+        <h1 className="font-[family-name:var(--font-display)] text-[32px] md:text-[48px] font-extrabold tracking-[0.1em] mb-2"
           style={{ color: "var(--color-text-primary)" }}>
-          GAENDE
+          Pavoia Webradio
         </h1>
 
-        {/* Anti-Algorithm badge */}
-        <div className="clip-skew px-4 py-1.5 mb-12" style={{
-          background: "rgba(255, 34, 68, 0.15)",
-          border: "1px solid rgba(255, 34, 68, 0.3)",
-        }}>
-          <span className="font-[family-name:var(--font-terminal)] text-[11px] font-bold tracking-[0.1em] uppercase"
-            style={{ color: "var(--color-error)" }}>
-            Anti-Algorithm Radio
-          </span>
+        {/* Subtitle */}
+        <div className="font-[family-name:var(--font-terminal)] text-[11px] tracking-[0.15em] uppercase mb-12"
+          style={{ color: "var(--color-text-muted)" }}>
+          9 stages · 24/7 · high quality audio
         </div>
 
-        {/* Bio */}
+        {/* Bio — real text from v1 */}
         <div className="max-w-2xl">
           <p className="font-[family-name:var(--font-editorial)] text-[17px] leading-[1.85]"
             style={{ color: "var(--color-text-secondary)" }}>
-            GAENDE is a DJ, producer, and software engineer running a 9-stage 24/7 webradio
-            from a seedbox. The curation process IS the content. Every track, every stat,
-            every digging session — radically transparent. No algorithms, no curtain.
+            This collection started years ago, built from artists heard at Pavoia and
+            countless hours of digging for new sounds. Every time I fall for a track, I
+            picture which stage it belongs to. What began as a personal obsession slowly
+            grew into something worth sharing. Today, these nine streams are open to
+            everyone, and the playlists keep growing with fresh discoveries.
           </p>
           <p className="font-[family-name:var(--font-editorial)] text-[17px] leading-[1.85] mt-6"
             style={{ color: "var(--color-text-secondary)" }}>
-            Nine themed stages run around the clock — from progressive melodic techno to
-            ambient, DnB to Afro house. Each playlist is hand-curated from a personal Plex
-            library of thousands of tracks, synced and enriched through Last.fm and
-            MusicBrainz. What you see here is the full depth of that collection.
+            All streams are in <strong>high quality audio</strong>, pure and unprocessed,
+            just as the artists intended.
           </p>
         </div>
 
-        {/* Cities */}
-        <div className="mt-20 font-[family-name:var(--font-terminal)] text-[11px] tracking-[0.15em]"
-          style={{ color: "var(--color-text-muted)" }}>
-          PARIS ◆ BERLIN ◆ TBILISI
+        {/* Links */}
+        <div className="flex gap-3 mt-10 flex-wrap justify-center">
+          <a href="https://instagram.com/wearepavoia" target="_blank" rel="noopener noreferrer"
+            className="font-[family-name:var(--font-mono)] text-[12px] px-4 py-2 no-underline transition-all"
+            style={{ color: "var(--color-accent)", border: "1px solid var(--border-default)", background: "var(--color-bg-card)" }}>
+            Instagram <span style={{ color: "var(--color-text-muted)" }}>@wearepavoia</span>
+          </a>
+          <a href="https://soundcloud.com/pavoia" target="_blank" rel="noopener noreferrer"
+            className="font-[family-name:var(--font-mono)] text-[12px] px-4 py-2 no-underline transition-all"
+            style={{ color: "var(--color-accent)", border: "1px solid var(--border-default)", background: "var(--color-bg-card)" }}>
+            SoundCloud <span style={{ color: "var(--color-text-muted)" }}>@pavoia</span>
+          </a>
+        </div>
+
+        {/* Footer */}
+        <div className="mt-16 font-[family-name:var(--font-terminal)] text-[11px]"
+          style={{ color: "var(--color-text-ghost)" }}>
+          made with ♥ by <a href="https://instagram.com/gaende_music" target="_blank" rel="noopener noreferrer"
+            style={{ color: "var(--color-text-muted)" }}>gaende</a>
         </div>
       </div>
     </div>

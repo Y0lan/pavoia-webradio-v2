@@ -28,19 +28,19 @@ export function Sidebar() {
       <div className="p-5 pb-6">
         <Link
           href="/"
-          className="font-[family-name:var(--font-display)] text-[14px] font-extrabold tracking-[0.3em] no-underline"
+          className="font-[family-name:var(--font-display)] text-[14px] font-extrabold tracking-[0.2em] no-underline"
           style={{
             color: "var(--color-accent)",
             textShadow: "0 0 12px var(--color-accent-dim)",
           }}
         >
-          GAENDE
+          PAVOIA
         </Link>
         <div
           className="font-[family-name:var(--font-terminal)] text-[9px] tracking-[0.15em] uppercase mt-1"
           style={{ color: "var(--color-text-muted)" }}
         >
-          ANTI-ALGORITHM RADIO
+          WEBRADIO · 9 STAGES
         </div>
       </div>
 

@@ -102,13 +102,11 @@ export default function StagePage() {
           {np?.album || ""}
         </p>
 
-        {/* Badges */}
-        <div className="flex gap-2 mt-4">
-          <span className="font-[family-name:var(--font-terminal)] text-[10px] tracking-[0.08em] uppercase px-2.5 py-1"
-            style={{ color, background: `${color}10`, border: `1px solid ${color}20` }}>
-            {stage.genre}
-          </span>
-        </div>
+        {/* Description */}
+        <p className="font-[family-name:var(--font-mono)] text-[12px] mt-4 max-w-md text-center"
+          style={{ color: "var(--color-text-secondary)" }}>
+          {stage.icon} {stage.desc}
+        </p>
 
         {/* Visualizer */}
         <canvas ref={canvasRef} width={800} height={120}

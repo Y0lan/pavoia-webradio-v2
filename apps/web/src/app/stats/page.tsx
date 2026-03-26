@@ -16,7 +16,7 @@ function SectionLabel({ label }: { label: string }) {
 export default function StatsPage() {
   const { data: topArtists } = useQuery({
     queryKey: ["stats-top-artists"],
-    queryFn: () => fetch(`${BRIDGE_URL}/api/stats/top-artists?limit=10`).then((r) => r.json()),
+    queryFn: () => fetch(`${BRIDGE_URL}/api/stats/top-artists?limit=10&by=tracks`).then((r) => r.json()),
   });
   const { data: topTracks } = useQuery({
     queryKey: ["stats-top-tracks"],
