@@ -1,6 +1,5 @@
 import { create } from "zustand";
-
-const BRIDGE_URL = process.env.NEXT_PUBLIC_BRIDGE_URL || "http://localhost:3001";
+import { BRIDGE_URL } from "./stages";
 
 export type CrossfadeCurve = "equal-power" | "s-curve" | "exponential" | "linear" | "cut";
 

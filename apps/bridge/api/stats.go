@@ -212,10 +212,8 @@ func (h *StatsHandlers) HandleStatsTopTracks(w http.ResponseWriter, r *http.Requ
 func (h *StatsHandlers) HandleStatsStages(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.DB.Query(r.Context(), `
 		SELECT stage_id, COUNT(*) as plays,
-			COUNT(DISTINCT artist) as unique_artists,
-			AVG(NULLIF(lt.bpm, 0)) as avg_bpm
-		FROM track_plays tp
-		LEFT JOIN library_tracks lt ON tp.file_path = lt.file_path
+			COUNT(DISTINCT artist) as unique_artists
+		FROM track_plays
 		GROUP BY stage_id
 		ORDER BY plays DESC
 	`)
@@ -226,15 +224,14 @@ func (h *StatsHandlers) HandleStatsStages(w http.ResponseWriter, r *http.Request
 	defer rows.Close()
 
 	type stageStat struct {
-		StageID       string   `json:"stage_id"`
-		Plays         int      `json:"plays"`
-		UniqueArtists int      `json:"unique_artists"`
-		AvgBPM        *float64 `json:"avg_bpm"`
+		StageID       string `json:"stage_id"`
+		Plays         int    `json:"plays"`
+		UniqueArtists int    `json:"unique_artists"`
 	}
 	results := make([]stageStat, 0)
 	for rows.Next() {
 		var s stageStat
-		if err := rows.Scan(&s.StageID, &s.Plays, &s.UniqueArtists, &s.AvgBPM); err != nil {
+		if err := rows.Scan(&s.StageID, &s.Plays, &s.UniqueArtists); err != nil {
 			slog.Warn("stats stages: scan failed", "error", err)
 			continue
 		}

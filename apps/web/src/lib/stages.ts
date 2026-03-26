@@ -16,4 +16,6 @@ export function getStage(id: string) {
   return STAGES.find((s) => s.id === id);
 }
 
-export const BRIDGE_URL = process.env.NEXT_PUBLIC_BRIDGE_URL || "http://localhost:3001";
+// When behind a reverse proxy (production), BRIDGE_URL is empty (same origin).
+// For local dev, set NEXT_PUBLIC_BRIDGE_URL=http://localhost:3001
+export const BRIDGE_URL = process.env.NEXT_PUBLIC_BRIDGE_URL || "";

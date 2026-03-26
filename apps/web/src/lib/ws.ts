@@ -1,7 +1,14 @@
 import { create } from "zustand";
 
-const BRIDGE_URL = process.env.NEXT_PUBLIC_BRIDGE_URL || "http://localhost:3001";
-const WS_URL = BRIDGE_URL.replace(/^http/, "ws") + "/ws";
+// In production (behind proxy), use relative WS URL from current origin.
+// In dev, NEXT_PUBLIC_BRIDGE_URL points to the bridge directly.
+const BRIDGE_URL = process.env.NEXT_PUBLIC_BRIDGE_URL || "";
+function getWSURL(): string {
+  if (typeof window === "undefined") return "ws://localhost:3001/ws";
+  if (BRIDGE_URL) return BRIDGE_URL.replace(/^http/, "ws") + "/ws";
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}/ws`;
+}
 
 export interface NowPlaying {
   stage_id: string;
@@ -47,7 +54,7 @@ export const useWSStore = create<WSState>((set, get) => ({
     if (ws && ws.readyState <= WebSocket.OPEN) return;
 
     try {
-      ws = new WebSocket(WS_URL);
+      ws = new WebSocket(getWSURL());
     } catch {
       scheduleReconnect(get);
       return;
