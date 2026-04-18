@@ -160,11 +160,13 @@ cd apps/bridge && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ../../bridge
 | Stage ID | Display Name | MPD Control | HTTP Stream | Genre |
 |---|---|---|---|---|
 | gaende-favorites | Main Stage | :6600 | :14000 | Progressive Melodic Techno |
-| etage-0 | Techno Bunker | :6601 | :14001 | Techno |
-| ambiance-safe | Ambient Horizon | :6602 | :14002 | Ambient |
-| palac-dance | Indie Floor | :6603 | :14003 | Indie Dance |
-| fontanna-laputa | Deep Current | :6604 | :14004 | Deep House |
+| ambiance-safe | Ambient Horizon | :6601 | :14001 | Ambient |
+| etage-0 | Techno Bunker | :6602 | :14002 | Techno |
+| fontanna-laputa | Deep Current | :6603 | :14003 | Deep House |
+| palac-dance | Indie Floor | :6604 | :14004 | Indie Dance |
 | palac-slow-hypno | Chill Terrace | :6605 | :14005 | Chillout |
 | bermuda-night | Bass Cave | :6606 | :14006 | DnB |
 | bermuda-day | World Frequencies | :6607 | :14007 | Afro House |
 | closing | Live Sets | :6608 | :14008 | Live |
+
+> **Port ordering is non-obvious:** stages 2–5 don't run on ports in stage-order. The MPD config files on Whatbox bind `ambiance-safe` to `6601`, `etage-0` to `6602`, `fontanna-laputa` to `6603`, `palac-dance` to `6604` — and each MPD's `music_directory` is named after its stage, so the content semantically follows the bind. The bridge `config.go` mirrors this. Fixing the "out-of-order" look here would require also rebinding the Whatbox MPDs; otherwise stages will stream the wrong content (previously etage-0 streamed ambient tracks labelled as "Techno"). Diagnosed 2026-04-19; drift is now logged at boot via `slog` "stage port mapping" lines.

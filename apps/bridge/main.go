@@ -106,6 +106,20 @@ func main() {
 		}
 	})
 
+	// Echo the resolved stage → port mapping once at boot so config drift between
+	// the bridge's StageConfig and the MPD config files on disk surfaces in logs
+	// instead of only through /api/stages returning mysteriously-wrong content.
+	// Caught the 2026-04-19 6601↔6602 + 6603↔6604 swap; future drift will be
+	// visible the moment the bridge restarts.
+	for _, s := range cfg.VisibleStages() {
+		slog.Info("stage port mapping",
+			"stage", s.ID,
+			"genre", s.Genre,
+			"mpd_port", s.MPDPort,
+			"stream_port", s.StreamPort,
+		)
+	}
+
 	connected := pool.ConnectAll(cfg.MPDHost)
 	slog.Info("mpd pool ready", "connected", connected, "total", len(cfg.VisibleStages()))
 	pool.StartWatchers(ctx, cfg.MPDHost)

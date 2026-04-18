@@ -102,10 +102,18 @@ func defaultStages() []StageConfig {
 	// frozen stage ↔ Plex mapping per user directive (2026-04-18).
 	return []StageConfig{
 		{ID: "gaende-favorites", Name: "Main Stage", Description: "Progressive melodic techno, the heart of GAENDE", MPDPort: 6600, StreamPort: 14000, Genre: "Progressive Melodic Techno", Color: "#00ffc8", BPMMin: 118, BPMMax: 128, Visible: true, Order: 1, Playlists: []string{"❤️ Tracks"}},
-		{ID: "etage-0", Name: "Techno Bunker", Description: "Raw, industrial, uncompromising", MPDPort: 6601, StreamPort: 14001, Genre: "Techno", Color: "#ff0066", BPMMin: 130, BPMMax: 145, Visible: true, Order: 2, Playlists: []string{"ETAGE 0", "Etage 0 - FAST DARK MINIMAL"}},
-		{ID: "ambiance-safe", Name: "Ambient Horizon", Description: "Ambient, downtempo, introspective", MPDPort: 6602, StreamPort: 14002, Genre: "Ambient", Color: "#00ddff", BPMMin: 70, BPMMax: 110, Visible: true, Order: 3, Playlists: []string{"AMBIANCE"}},
-		{ID: "palac-dance", Name: "Indie Floor", Description: "Indie dance, nu-disco, groovy", MPDPort: 6603, StreamPort: 14003, Genre: "Indie Dance", Color: "#ffaa00", BPMMin: 110, BPMMax: 125, Visible: true, Order: 4, Playlists: []string{"PALAC - DANCE"}},
-		{ID: "fontanna-laputa", Name: "Deep Current", Description: "Deep house, organic, hypnotic", MPDPort: 6604, StreamPort: 14004, Genre: "Deep House", Color: "#7b7bff", BPMMin: 115, BPMMax: 124, Visible: true, Order: 5, Playlists: []string{"FONTANNA", "MINIMAL"}},
+		// NOTE: ports 6601↔6602 and 6603↔6604 look swapped vs "stage order = port order".
+		// They're not a typo. The MPD config files on Whatbox (~/.config/mpd/{stage}/mpd.conf)
+		// bind each stage to the port we reflect here, and each MPD instance owns a
+		// music_directory named after its stage. If you "fix" the numbers here without
+		// also rebinding the Whatbox MPDs, stages will play the wrong content (e.g.
+		// etage-0 will stream ambient tracks). Discovered 2026-04-19 after the
+		// /api/stages alive:false cascade was diagnosed. See main.go startup log
+		// "stage port mapping" which echoes the resolved ports on every boot.
+		{ID: "etage-0", Name: "Techno Bunker", Description: "Raw, industrial, uncompromising", MPDPort: 6602, StreamPort: 14002, Genre: "Techno", Color: "#ff0066", BPMMin: 130, BPMMax: 145, Visible: true, Order: 2, Playlists: []string{"ETAGE 0", "Etage 0 - FAST DARK MINIMAL"}},
+		{ID: "ambiance-safe", Name: "Ambient Horizon", Description: "Ambient, downtempo, introspective", MPDPort: 6601, StreamPort: 14001, Genre: "Ambient", Color: "#00ddff", BPMMin: 70, BPMMax: 110, Visible: true, Order: 3, Playlists: []string{"AMBIANCE"}},
+		{ID: "palac-dance", Name: "Indie Floor", Description: "Indie dance, nu-disco, groovy", MPDPort: 6604, StreamPort: 14004, Genre: "Indie Dance", Color: "#ffaa00", BPMMin: 110, BPMMax: 125, Visible: true, Order: 4, Playlists: []string{"PALAC - DANCE"}},
+		{ID: "fontanna-laputa", Name: "Deep Current", Description: "Deep house, organic, hypnotic", MPDPort: 6603, StreamPort: 14003, Genre: "Deep House", Color: "#7b7bff", BPMMin: 115, BPMMax: 124, Visible: true, Order: 5, Playlists: []string{"FONTANNA", "MINIMAL"}},
 		{ID: "palac-slow-hypno", Name: "Chill Terrace", Description: "Lo-fi, chillout, balearic", MPDPort: 6605, StreamPort: 14005, Genre: "Chillout", Color: "#44ddff", BPMMin: 80, BPMMax: 110, Visible: true, Order: 6, Playlists: []string{"PALAC - SLOW AND HYPNOTIC - POETIC"}},
 		{ID: "bermuda-night", Name: "Bass Cave", Description: "DnB, breakbeat, UK garage", MPDPort: 6606, StreamPort: 14006, Genre: "DnB", Color: "#ff44ff", BPMMin: 140, BPMMax: 174, Visible: true, Order: 7, Playlists: []string{"BERMUDA - AFTER 6"}},
 		{ID: "bermuda-day", Name: "World Frequencies", Description: "Afro house, global bass", MPDPort: 6607, StreamPort: 14007, Genre: "Afro House", Color: "#ff4466", BPMMin: 115, BPMMax: 130, Visible: true, Order: 8, Playlists: []string{"BERMUDA - BEFORE 6"}},
