@@ -14,6 +14,7 @@ LAST with sha256 of each top-level artifact so a downstream Go disk importer can
 refuse to ingest a partially-written generation.
 """
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from subprocess import call
@@ -44,23 +46,58 @@ if not USERNAME or not PASSWORD:
     )
     sys.exit(1)
 
+# --- Run lock: prevent overlapping syncs (Phase C5 hardening, F5.1).
+# Two concurrent runs would race on shared global dicts and on the final
+# artifact writes, producing a manifest whose sha256 entries describe one
+# generation's JSON but a different generation's sidecars.
+_LOCK_PATH = os.path.join(WEBRADIO_FOLDER, '.sync.lock')
+_LOCK_FH = None
+try:
+    os.makedirs(WEBRADIO_FOLDER, exist_ok=True)
+    _LOCK_FH = open(_LOCK_PATH, 'w')
+    fcntl.flock(_LOCK_FH.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _LOCK_FH.write(f"{os.getpid()}\n")
+    _LOCK_FH.flush()
+except BlockingIOError:
+    sys.stderr.write(
+        f"ERROR: another sync is already running (lock: {_LOCK_PATH}).\n"
+        "  Wait for it to finish, or remove the lock file if the process is dead.\n"
+    )
+    sys.exit(2)
+except Exception as e:
+    sys.stderr.write(f"WARN: could not acquire run lock ({e}); proceeding without exclusion.\n")
+
 PLEX = MyPlexAccount(USERNAME, PASSWORD).resource(SERVERNAME).connect()
 
-# Plex server URL and token for building URLs in artifact metadata
+# Plex server URL and token. _TOKEN is kept internally for Plex API calls (via plexapi)
+# but MUST NOT be written to disk: the produced JSON artifacts live on a filesystem
+# with a public webradio surface, and a leaked Plex token is a reusable Plex auth cred.
+# We only persist path fragments (parentThumb, parentArt, …) plus the Plex ratingKey;
+# the bridge can re-sign URLs at serve time from its own PLEX_TOKEN env if needed.
 PLEX_URL = PLEX._baseurl
-PLEX_TOKEN = PLEX._token
+_PLEX_TOKEN_SECRET = PLEX._token  # SECRET — do not serialize. See F5.5.
+
+# --- Thread-safety for the shared collection dicts (Phase C5 hardening, F5.3).
+# save_metadata_json runs under ThreadPoolExecutor; check-then-act on shared dicts
+# produces duplicates, torn sets, and lost playlist associations without a lock.
+_SHARED_LOCK = threading.Lock()
 
 
 # --- Atomic I/O helpers (Phase C5) ---
 
 def atomic_write_json(path, data):
-    """Write JSON to path atomically via tempfile + os.replace, with fsync.
+    """Write JSON to path atomically via tempfile + os.replace, with fsync on both
+    the file and its containing directory.
 
-    Prevents readers from seeing half-written files. Tempfile lives in the same
-    directory as the target so os.replace() is atomic on the same filesystem.
+    Durability story:
+      1. Write to a hidden tempfile in the same directory (so os.replace is atomic
+         on the same filesystem).
+      2. fsync(file) — data on stable storage.
+      3. os.replace(tmp, path) — atomic rename.
+      4. fsync(dir) — rename on stable storage; without this, a crash between #3
+         and the next directory flush can revert the rename.
     """
     dirname = os.path.dirname(path) or '.'
-    # Hidden tmp name so an interrupted run leaves clearly-orphaned debris, not pollution.
     fd, tmp_path = tempfile.mkstemp(
         prefix='.' + os.path.basename(path) + '.',
         suffix='.tmp',
@@ -72,6 +109,17 @@ def atomic_write_json(path, data):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        # Durability for the rename itself (F5.7).
+        try:
+            dir_fd = os.open(dirname, os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            # Some filesystems (FUSE, certain network mounts) don't support O_DIRECTORY
+            # or fsync on dirs. The rename is still atomic — just not crash-proof.
+            pass
     except Exception:
         with contextlib.suppress(FileNotFoundError):
             os.remove(tmp_path)
@@ -143,10 +191,19 @@ def get_local_path(song):
         return None
 
 def extract_track_metadata(track, playlist_name):
-    """Extract simplified metadata from a Plex track object, including playlist association."""
+    """Extract simplified metadata from a Plex track object, including playlist association.
+
+    Thread-safety: ThreadPoolExecutor runs this concurrently across hundreds of tracks,
+    and the body is full of check-then-act operations against shared dicts. We hold
+    _SHARED_LOCK for the entire body — lock overhead is one acquire per track (~7k/run),
+    and the serialized section is mostly in-memory work, so throughput cost is negligible.
+    Plex I/O (PLEX.fetchItem for artist enrichment) happens under the lock as well —
+    accepting that tradeoff to keep correctness obviously correct.
+    """
+    _SHARED_LOCK.acquire()
     try:
         track_key = track.ratingKey
-        
+
         # If we've already processed this track, just add the playlist association
         if track_key in TRACKS_DATA:
             if playlist_name not in TRACKS_DATA[track_key]["playlists"]:
@@ -168,14 +225,14 @@ def extract_track_metadata(track, playlist_name):
                 "disc_number": getattr(track, 'parentIndex', None)
             },
             "album": {
-                "cover_url": None,
-                "art_url": None,
+                "cover_path": None,
+                "art_path": None,
                 "rating_key": getattr(track, 'parentRatingKey', None)
             },
             "artist": {
                 "name": getattr(track, 'grandparentTitle', 'Unknown Artist'),
-                "thumb_url": None,
-                "art_url": None,
+                "thumb_path": None,
+                "art_path": None,
                 "rating_key": getattr(track, 'grandparentRatingKey', None)
             },
             "file": {
@@ -203,19 +260,17 @@ def extract_track_metadata(track, playlist_name):
         if hasattr(track, 'moods') and track.moods:
             metadata["track"]["moods"] = [mood.tag for mood in track.moods]
 
-        # Build full URLs for album art
+        # Store only the Plex path fragments (no auth token). A consumer that wants
+        # to fetch the image signs its own URL: f"{PLEX_URL}{path}?X-Plex-Token={its-token}".
+        # See F5.5 — tokens must never be serialized to disk.
         if hasattr(track, 'parentThumb') and track.parentThumb:
-            metadata["album"]["cover_url"] = f"{PLEX_URL}{track.parentThumb}?X-Plex-Token={PLEX_TOKEN}"
-        
+            metadata["album"]["cover_path"] = track.parentThumb
         if hasattr(track, 'parentArt') and track.parentArt:
-            metadata["album"]["art_url"] = f"{PLEX_URL}{track.parentArt}?X-Plex-Token={PLEX_TOKEN}"
-
-        # Build full URLs for artist images
+            metadata["album"]["art_path"] = track.parentArt
         if hasattr(track, 'grandparentThumb') and track.grandparentThumb:
-            metadata["artist"]["thumb_url"] = f"{PLEX_URL}{track.grandparentThumb}?X-Plex-Token={PLEX_TOKEN}"
-        
+            metadata["artist"]["thumb_path"] = track.grandparentThumb
         if hasattr(track, 'grandparentArt') and track.grandparentArt:
-            metadata["artist"]["art_url"] = f"{PLEX_URL}{track.grandparentArt}?X-Plex-Token={PLEX_TOKEN}"
+            metadata["artist"]["art_path"] = track.grandparentArt
 
         # Store track data globally
         TRACKS_DATA[track_key] = {
@@ -231,8 +286,8 @@ def extract_track_metadata(track, playlist_name):
                 "artist": getattr(track, 'grandparentTitle', 'Unknown Artist'),
                 "artist_key": getattr(track, 'grandparentRatingKey', None),
                 "year": getattr(track, 'year', None),
-                "cover_url": metadata["album"]["cover_url"],
-                "art_url": metadata["album"]["art_url"],
+                "cover_path": metadata["album"]["cover_path"],
+                "art_path": metadata["album"]["art_path"],
                 "rating_key": album_key,
                 "tracks": []
             }
@@ -265,8 +320,8 @@ def extract_track_metadata(track, playlist_name):
                     ARTISTS_DATA[artist_key] = {
                         "name": getattr(artist_obj, 'title', metadata["artist"]["name"]),
                         "bio": getattr(artist_obj, 'summary', None),
-                        "thumb_url": metadata["artist"]["thumb_url"],
-                        "art_url": metadata["artist"]["art_url"],
+                        "thumb_path": metadata["artist"]["thumb_path"],
+                        "art_path": metadata["artist"]["art_path"],
                         "rating_key": artist_key,
                         "genres": [genre.tag for genre in getattr(artist_obj, 'genres', [])] if hasattr(artist_obj, 'genres') else [],
                         "moods": [mood.tag for mood in getattr(artist_obj, 'moods', [])] if hasattr(artist_obj, 'moods') else [],
@@ -280,8 +335,8 @@ def extract_track_metadata(track, playlist_name):
                     ARTISTS_DATA[artist_key] = {
                         "name": metadata["artist"]["name"],
                         "bio": None,
-                        "thumb_url": metadata["artist"]["thumb_url"],
-                        "art_url": metadata["artist"]["art_url"],
+                        "thumb_path": metadata["artist"]["thumb_path"],
+                        "art_path": metadata["artist"]["art_path"],
                         "rating_key": artist_key,
                         "genres": [],
                         "moods": [],
@@ -296,7 +351,7 @@ def extract_track_metadata(track, playlist_name):
                 ARTISTS_DATA[artist_key]["albums"][album_key] = {
                     "title": getattr(track, 'parentTitle', 'Unknown Album'),
                     "year": getattr(track, 'year', None),
-                    "cover_url": metadata["album"]["cover_url"],
+                    "cover_path": metadata["album"]["cover_path"],
                     "tracks": []
                 }
             
@@ -323,10 +378,11 @@ def extract_track_metadata(track, playlist_name):
             ARTISTS_DATA[artist_key]["playlists"].add(playlist_name)
 
         return metadata
-    
     except Exception as e:
         print(f"Error extracting metadata for {track.title}: {e}")
         return None
+    finally:
+        _SHARED_LOCK.release()
 
 def save_metadata_json(metadata, json_path, audio_file_path):
     """Save metadata to JSON file, preserving added_to_webradio date if file exists."""
@@ -458,7 +514,10 @@ def save_global_metadata():
         print(f"📜 Wrote sync_manifest.json (generation {generation_id})")
 
     except Exception as e:
-        print(f"Error saving global metadata files: {e}")
+        # Re-raise so main() exits non-zero; cron picks this up instead of silently
+        # printing "Sync complete!" over a half-written generation (F5.4).
+        print(f"ERROR saving global metadata files: {e}", file=sys.stderr)
+        raise
 
 def should_ignore_playlist(playlist_name):
     """Check if playlist should be ignored based on contains matching."""
