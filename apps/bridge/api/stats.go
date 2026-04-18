@@ -26,6 +26,7 @@ func (h *StatsHandlers) HandleStatsOverview(w http.ResponseWriter, r *http.Reque
 			COUNT(DISTINCT lower(artist)),
 			COUNT(*) FILTER (WHERE added_at >= $1)
 		FROM library_tracks
+		WHERE deleted_at IS NULL
 	`, weekAgo).Scan(&totalTracks, &totalArtists, &weekAdded)
 	if err != nil {
 		slog.Warn("stats overview: library_tracks query failed", "error", err)
@@ -105,7 +106,7 @@ func (h *StatsHandlers) HandleStatsTopArtists(w http.ResponseWriter, r *http.Req
 		}
 		query = fmt.Sprintf(`
 			SELECT artist, COUNT(*) as count
-			FROM library_tracks WHERE 1=1 %s %s
+			FROM library_tracks WHERE deleted_at IS NULL %s %s
 			GROUP BY artist ORDER BY count DESC LIMIT %d
 		`, stageClause, periodClause, limit)
 	default: // plays — track_plays.stage_id is still scalar (a play happens on one stage)
@@ -257,7 +258,7 @@ func (h *StatsHandlers) HandleStatsStages(w http.ResponseWriter, r *http.Request
 
 // HandleStatsBPM serves GET /api/stats/bpm?stage=
 func (h *StatsHandlers) HandleStatsBPM(w http.ResponseWriter, r *http.Request) {
-	query := `SELECT bpm, COUNT(*) FROM library_tracks WHERE bpm IS NOT NULL AND bpm > 0`
+	query := `SELECT bpm, COUNT(*) FROM library_tracks WHERE deleted_at IS NULL AND bpm IS NOT NULL AND bpm > 0`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
 		query += ` AND EXISTS (SELECT 1 FROM track_stages ts WHERE ts.file_path = library_tracks.file_path AND ts.stage_id = $1)`
@@ -296,7 +297,7 @@ func (h *StatsHandlers) HandleStatsBPM(w http.ResponseWriter, r *http.Request) {
 
 // HandleStatsKeys serves GET /api/stats/keys?stage=
 func (h *StatsHandlers) HandleStatsKeys(w http.ResponseWriter, r *http.Request) {
-	query := `SELECT camelot_key, COUNT(*) FROM library_tracks WHERE camelot_key IS NOT NULL`
+	query := `SELECT camelot_key, COUNT(*) FROM library_tracks WHERE deleted_at IS NULL AND camelot_key IS NOT NULL`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
 		query += ` AND EXISTS (SELECT 1 FROM track_stages ts WHERE ts.file_path = library_tracks.file_path AND ts.stage_id = $1)`
@@ -335,7 +336,7 @@ func (h *StatsHandlers) HandleStatsKeys(w http.ResponseWriter, r *http.Request) 
 
 // HandleStatsDecades serves GET /api/stats/decades?stage=
 func (h *StatsHandlers) HandleStatsDecades(w http.ResponseWriter, r *http.Request) {
-	query := `SELECT (year/10)*10 as decade, COUNT(*) FROM library_tracks WHERE year IS NOT NULL AND year > 0`
+	query := `SELECT (year/10)*10 as decade, COUNT(*) FROM library_tracks WHERE deleted_at IS NULL AND year IS NOT NULL AND year > 0`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
 		query += ` AND EXISTS (SELECT 1 FROM track_stages ts WHERE ts.file_path = library_tracks.file_path AND ts.stage_id = $1)`
@@ -374,7 +375,7 @@ func (h *StatsHandlers) HandleStatsDecades(w http.ResponseWriter, r *http.Reques
 
 // HandleStatsGenres serves GET /api/stats/genres?stage=
 func (h *StatsHandlers) HandleStatsGenres(w http.ResponseWriter, r *http.Request) {
-	query := `SELECT genre, COUNT(*) FROM library_tracks WHERE genre IS NOT NULL AND genre != ''`
+	query := `SELECT genre, COUNT(*) FROM library_tracks WHERE deleted_at IS NULL AND genre IS NOT NULL AND genre != ''`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
 		query += ` AND EXISTS (SELECT 1 FROM track_stages ts WHERE ts.file_path = library_tracks.file_path AND ts.stage_id = $1)`
@@ -417,7 +418,7 @@ func (h *StatsHandlers) HandleStatsDiscoveryVelocity(w http.ResponseWriter, r *h
 	rows, err := h.DB.Query(r.Context(), `
 		SELECT DATE_TRUNC('week', added_at)::date::text, COUNT(*)
 		FROM library_tracks
-		WHERE added_at >= NOW() - INTERVAL '52 weeks'
+		WHERE deleted_at IS NULL AND added_at >= NOW() - INTERVAL '52 weeks'
 		GROUP BY DATE_TRUNC('week', added_at)
 		ORDER BY 1
 	`)

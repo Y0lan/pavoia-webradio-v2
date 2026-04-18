@@ -72,7 +72,7 @@ func (h *HistoryHandlers) HandleHistory(w http.ResponseWriter, r *http.Request) 
 	}
 	if genre := q.Get("genre"); genre != "" {
 		// Join with library_tracks for genre filter
-		where += " AND file_path IN (SELECT file_path FROM library_tracks WHERE genre = " + nextArg() + ")"
+		where += " AND file_path IN (SELECT file_path FROM library_tracks WHERE deleted_at IS NULL AND genre = " + nextArg() + ")"
 		args = append(args, genre)
 	}
 	if search := q.Get("search"); search != "" {

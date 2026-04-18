@@ -101,7 +101,7 @@ func (h *ArtistsHandlers) HandleArtistsList(w http.ResponseWriter, r *http.Reque
 		FROM artists a
 		LEFT JOIN (
 			SELECT artist_id, COUNT(*) as track_count
-			FROM library_tracks
+			FROM library_tracks WHERE deleted_at IS NULL
 			GROUP BY artist_id
 		) tc ON tc.artist_id = a.id
 		%s %s
@@ -149,7 +149,7 @@ func (h *ArtistsHandlers) HandleArtistDetail(w http.ResponseWriter, r *http.Requ
 	err = h.DB.QueryRow(r.Context(), `
 		SELECT a.id, a.name, a.mbid, a.country, a.bio, a.image_url, a.banner_url,
 			a.tags, a.external_links, a.enriched_at, a.enrichment_source,
-			(SELECT COUNT(*) FROM library_tracks lt WHERE lt.artist_id = a.id) as track_count,
+			(SELECT COUNT(*) FROM library_tracks lt WHERE lt.deleted_at IS NULL AND lt.artist_id = a.id) as track_count,
 			(SELECT COUNT(*) FROM track_plays tp WHERE lower(tp.artist) = lower(a.name)) as play_count
 		FROM artists a WHERE a.id = $1
 	`, id).Scan(
@@ -179,7 +179,7 @@ func (h *ArtistsHandlers) HandleArtistTracks(w http.ResponseWriter, r *http.Requ
 	pg := ParsePagination(r)
 
 	var total int
-	if err := h.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM library_tracks WHERE artist_id = $1", id).Scan(&total); err != nil {
+	if err := h.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM library_tracks WHERE deleted_at IS NULL AND artist_id = $1", id).Scan(&total); err != nil {
 		slog.Warn("artist tracks: count query failed", "error", err)
 		WriteError(w, http.StatusInternalServerError, "count query failed")
 		return
@@ -193,7 +193,7 @@ func (h *ArtistsHandlers) HandleArtistTracks(w http.ResponseWriter, r *http.Requ
 				ARRAY[]::text[]
 			) AS stage_ids,
 			COALESCE(lt.genre, ''), lt.bpm, lt.year, lt.added_at
-		FROM library_tracks lt WHERE lt.artist_id = $1
+		FROM library_tracks lt WHERE lt.deleted_at IS NULL AND lt.artist_id = $1
 		ORDER BY lt.added_at DESC
 		LIMIT $2 OFFSET $3
 	`, id, pg.PerPage, pg.Offset)
@@ -243,7 +243,7 @@ func (h *ArtistsHandlers) HandleArtistSimilar(w http.ResponseWriter, r *http.Req
 		WHERE (ar.artist_id_a = $1 OR ar.artist_id_b = $1)
 	`
 	if inLibrary {
-		query += " AND EXISTS (SELECT 1 FROM library_tracks lt WHERE lt.artist_id = a.id)"
+		query += " AND EXISTS (SELECT 1 FROM library_tracks lt WHERE lt.deleted_at IS NULL AND lt.artist_id = a.id)"
 	}
 	query += " ORDER BY ar.weight DESC LIMIT 50"
 

@@ -46,7 +46,7 @@ func (h *SearchHandlers) HandleSearch(w http.ResponseWriter, r *http.Request) {
 				) AS stage_ids,
 				COALESCE(lt.genre, '')
 			FROM library_tracks lt
-			WHERE lt.title ILIKE $1 OR lt.artist ILIKE $1 OR lt.album ILIKE $1
+			WHERE lt.deleted_at IS NULL AND (lt.title ILIKE $1 OR lt.artist ILIKE $1 OR lt.album ILIKE $1)
 			ORDER BY lt.title
 			LIMIT $2
 		`, pattern, limit)
