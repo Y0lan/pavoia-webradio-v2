@@ -72,11 +72,18 @@ cd ../..
 echo "  ✓ frontend built (standalone output)"
 
 # 3. Upload
+#
+# Stage the new bridge as `bridge.new` instead of overwriting `bridge`
+# in place. Linux refuses to overwrite a busy text file (ETXTBSY) so scp
+# straight onto a running binary fails with "dest open: Failure". We
+# promote bridge.new → bridge in step [5/6] after pkill-ing the running
+# process, which keeps redeploys idempotent even when the current bridge
+# is healthy.
 echo "[3/6] Uploading to Whatbox..."
 ssh -i "$WHATBOX_KEY" "$WHATBOX_HOST" "mkdir -p $REMOTE_DIR"
-scp -i "$WHATBOX_KEY" bridge-linux "$WHATBOX_HOST:$REMOTE_DIR/bridge"
+scp -i "$WHATBOX_KEY" bridge-linux "$WHATBOX_HOST:$REMOTE_DIR/bridge.new"
 scp -i "$WHATBOX_KEY" podman-compose.yml "$WHATBOX_HOST:$REMOTE_DIR/"
-ssh -i "$WHATBOX_KEY" "$WHATBOX_HOST" "chmod +x $REMOTE_DIR/bridge"
+ssh -i "$WHATBOX_KEY" "$WHATBOX_HOST" "chmod +x $REMOTE_DIR/bridge.new"
 
 # Frontend ships as the Next.js "standalone" bundle — a self-contained
 # app/server.js + its trimmed node_modules, plus static + public served
@@ -127,6 +134,17 @@ fi
 pkill -TERM -f "^\./bridge\$" 2>/dev/null || true
 sleep 2
 pkill -KILL -f "^\./bridge\$" 2>/dev/null || true
+
+# Promote staged binary (bridge.new → bridge). Only done AFTER the pkill so
+# the old process can't be holding the text-file-busy lock on the target.
+# If bridge.new doesn't exist, preserve whatever's currently installed —
+# that way an interrupted upload earlier in this run doesn't leave us with
+# no binary at all.
+if [ -f bridge.new ]; then
+    mv -f bridge.new bridge
+    chmod +x bridge
+    echo "  Promoted bridge.new → bridge"
+fi
 
 # Start bridge in background with explicit env (heredoc runs on remote shell, so
 # the variables we just sourced are in scope here).
