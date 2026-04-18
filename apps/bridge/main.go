@@ -411,29 +411,28 @@ func pgBackupStatus(ctx context.Context, database *db.DB) string {
 	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	// One query, two signals: (a) most recent row regardless of status, (b)
-	// most recent ok row. Scan both together.
-	var (
-		latestStatus *string
-		latestAt     *time.Time
-		lastOKAt     *time.Time
-	)
+	// Two signals: last ok + last failed. A fresh ok that happened AFTER the
+	// last failed clears the flag — a manual admin run that failed shouldn't
+	// poison /health if the nightly cron then ran cleanly. "failing" only
+	// when the latest failure is more recent than the latest ok AND within
+	// the failure window.
+	var lastOKAt, lastFailedAt *time.Time
 	err := database.Pool.QueryRow(queryCtx, `
 		SELECT
-			(SELECT status FROM pg_backup_log ORDER BY written_at DESC LIMIT 1),
-			(SELECT written_at FROM pg_backup_log ORDER BY written_at DESC LIMIT 1),
-			(SELECT MAX(written_at) FROM pg_backup_log WHERE status = 'ok')
-	`).Scan(&latestStatus, &latestAt, &lastOKAt)
+			(SELECT MAX(written_at) FROM pg_backup_log WHERE status = 'ok'),
+			(SELECT MAX(written_at) FROM pg_backup_log WHERE status = 'failed')
+	`).Scan(&lastOKAt, &lastFailedAt)
 	if err != nil {
 		// Table missing (migration hasn't run) or DB query failed.
 		return "never_ran"
 	}
-	if latestStatus == nil {
+	if lastOKAt == nil && lastFailedAt == nil {
 		return "never_ran"
 	}
-	// Recent failure beats everything else — a fresh ok doesn't hide a
-	// last-night failure, and a stale ok doesn't hide a fresh failure either.
-	if *latestStatus == "failed" && latestAt != nil && time.Since(*latestAt) <= pgBackupFailureWindow {
+	// "failing" if failure is the most-recent event AND recent.
+	if lastFailedAt != nil &&
+		(lastOKAt == nil || lastFailedAt.After(*lastOKAt)) &&
+		time.Since(*lastFailedAt) <= pgBackupFailureWindow {
 		return "failing"
 	}
 	if lastOKAt == nil {

@@ -40,7 +40,17 @@ if [ -f "$STATE_FILE" ]; then
     case "$FAILS" in ''|*[!0-9]*) FAILS=0 ;; esac
 fi
 
-HTTP=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$HEALTH_URL" 2>/dev/null || echo 000)
+# Note: curl's `-w '%{http_code}'` already emits "000" on connection failure,
+# and then exits non-zero. The previous `|| echo 000` fallback made the string
+# "000000" on real failures, which the "!= 000" check interpreted as success —
+# so a dead bridge would never have been restarted. Drop the fallback and let
+# curl's own emitted code be the source of truth.
+HTTP=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$HEALTH_URL" 2>/dev/null)
+if [ -z "$HTTP" ]; then
+    # Belt-and-suspenders: if curl somehow produced nothing (OOM, killed),
+    # treat as connection failure.
+    HTTP=000
+fi
 
 # HTTP 000 only fires when curl itself couldn't connect (ECONNREFUSED, timeout,
 # DNS). Anything else — including 503 "degraded" and 500 "internal error" —

@@ -28,8 +28,13 @@ mkdir -p "$BACKUP_DIR"
 STDERR_FILE=$(mktemp /tmp/pg-backup-err.XXXXXX)
 trap 'rm -f "$STDERR_FILE"' EXIT
 
+# Include the PID so two runs in the same second (admin kick overlapping with
+# cron, or same-host cron + a manual retry) don't both write the same tempfile
+# path and clobber each other mid-flight. The final rename to the un-PID'd
+# name still happens atomically via `mv`.
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 DUMP_PATH="$BACKUP_DIR/gaende-$TIMESTAMP.sql.gz"
+DUMP_TMP="$BACKUP_DIR/gaende-$TIMESTAMP.$$.sql.gz.tmp"
 
 log_heartbeat() {
     # Writes one row to pg_backup_log. Uses psql parameterized variables
@@ -60,14 +65,14 @@ DUMP_CMD=(
     docker.io/library/postgres:16-alpine
     pg_dump -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" --no-owner --no-acl "$PGDB"
 )
-if ! "${DUMP_CMD[@]}" 2>"$STDERR_FILE" | gzip -6 > "$DUMP_PATH.tmp"; then
+if ! "${DUMP_CMD[@]}" 2>"$STDERR_FILE" | gzip -6 > "$DUMP_TMP"; then
     err=$(tr '\n' ' ' < "$STDERR_FILE" | head -c 500)
     log_heartbeat "failed" "" "" "" "$err"
     echo "pg-backup: dump failed — $err" >&2
-    rm -f "$DUMP_PATH.tmp"
+    rm -f "$DUMP_TMP"
     exit 1
 fi
-mv "$DUMP_PATH.tmp" "$DUMP_PATH"
+mv "$DUMP_TMP" "$DUMP_PATH"
 
 # Sanity: gzip -t must pass before we call the backup "ok".
 if ! gzip -t "$DUMP_PATH" 2>/dev/null; then
