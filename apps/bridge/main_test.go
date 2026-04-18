@@ -93,6 +93,24 @@ func TestOverallHealth(t *testing.T) {
 			},
 			want: "down",
 		},
+		{
+			name: "disk sync stale but everything else ok -> degraded (advisory)",
+			checks: map[string]string{
+				"mpd": "ok", "postgres": "ok", "plex": "not_used",
+				"redis": "not_connected", "meilisearch": "not_connected",
+				"disk_sync": "stale",
+			},
+			want: "degraded",
+		},
+		{
+			name: "disk sync never_ran during cold boot -> degraded so it surfaces",
+			checks: map[string]string{
+				"mpd": "ok", "postgres": "ok", "plex": "not_used",
+				"redis": "not_connected", "meilisearch": "not_connected",
+				"disk_sync": "never_ran",
+			},
+			want: "degraded",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

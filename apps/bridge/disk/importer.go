@@ -32,8 +32,18 @@ type Importer struct {
 	// the same generation. Takes the place of an advisory lock — in-process
 	// single-writer, cross-process exclusion is handled on the Python side
 	// via .sync.lock.
-	mu             sync.Mutex
-	lastGeneration string
+	mu              sync.Mutex
+	lastGeneration  string
+	lastSuccessAt   time.Time // zero until the first clean run; /health freshness probe
+}
+
+// LastSuccess returns the timestamp of the most recent fully-successful
+// SyncOnce run, or the zero value if none has completed. Safe to call
+// concurrently. Used by the /health handler's freshness probe.
+func (im *Importer) LastSuccess() time.Time {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	return im.lastSuccessAt
 }
 
 // NewImporter constructs the importer. webradioDir is the root where Python
@@ -125,8 +135,13 @@ func (im *Importer) SyncOnce(ctx context.Context) (*SyncResult, error) {
 		for _, pl := range stage.Playlists {
 			tracks, err := im.syncPlaylistFolder(ctx, pl, stage.ID, artistIDs)
 			if err != nil {
+				// Abort the whole sync cycle on any playlist-level failure. If we
+				// continued with partial currentPaths, softDeleteOrphans would
+				// wrongly mark valid tracks in the failed playlist as deleted.
+				// Logging the generation skip so the next tick retries cleanly.
 				result.Errors = append(result.Errors, fmt.Sprintf("playlist %q: %v", pl, err))
-				continue
+				slog.Warn("disk sync: playlist failed, aborting run", "playlist", pl, "error", err)
+				return result, nil
 			}
 			for _, p := range tracks {
 				currentPaths[p] = struct{}{}
@@ -179,6 +194,7 @@ func (im *Importer) SyncOnce(ctx context.Context) (*SyncResult, error) {
 	// permanently skip a generation's worth of changes.
 	if len(result.Errors) == 0 {
 		im.lastGeneration = manifest.GenerationID
+		im.lastSuccessAt = time.Now().UTC()
 	}
 
 	slog.Info("disk sync: complete",
@@ -229,7 +245,9 @@ func (im *Importer) upsertArtists(ctx context.Context, records []ArtistRecord) (
 		`, a.Name, a.Bio, a.ThumbPath, mergeTagSlices(a.Genres, a.Moods)).Scan(&id)
 		if err != nil {
 			slog.Warn("disk sync: artist upsert failed", "name", a.Name, "error", err)
-			continue
+			// Return err so caller fails the whole generation instead of silently
+			// advancing lastGeneration past a partial upsert.
+			return nil, 0, fmt.Errorf("artist %q: %w", a.Name, err)
 		}
 		ids[strings.ToLower(a.Name)] = id
 		upserted++
@@ -299,7 +317,10 @@ func (im *Importer) syncPlaylistFolder(
 
 		sc, err := LoadSidecar(sidecarPath)
 		if err != nil {
-			// Missing or malformed sidecar — skip but don't fail the playlist.
+			// Missing or malformed sidecar — not a sync-level error; it just
+			// means Python hasn't produced one for this file yet. Skipping one
+			// sidecar in a playlist with hundreds is not worth a whole-run retry.
+			// Logged at DEBUG to keep info-level output clean.
 			slog.Debug("disk sync: sidecar load failed", "file", sidecarPath, "error", err)
 			continue
 		}
@@ -356,8 +377,10 @@ func (im *Importer) syncPlaylistFolder(
 			addedAt,
 		)
 		if err != nil {
-			slog.Warn("disk sync: library_tracks upsert failed", "file", filePath, "error", err)
-			continue
+			// A library_tracks write failing is a real DB problem; abort the
+			// playlist so the outer loop aborts the sync cycle, not a silent
+			// per-file warn that advances the generation regardless.
+			return nil, fmt.Errorf("library_tracks upsert %q: %w", filePath, err)
 		}
 
 		if _, err := tx.Exec(ctx, `
@@ -365,8 +388,7 @@ func (im *Importer) syncPlaylistFolder(
 			VALUES ($1, $2)
 			ON CONFLICT (file_path, stage_id) DO NOTHING
 		`, filePath, stageID); err != nil {
-			slog.Warn("disk sync: track_stages upsert failed", "file", filePath, "stage", stageID, "error", err)
-			continue
+			return nil, fmt.Errorf("track_stages upsert %q/%s: %w", filePath, stageID, err)
 		}
 		kept = append(kept, filePath)
 	}

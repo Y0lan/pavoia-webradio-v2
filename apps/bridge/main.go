@@ -117,9 +117,10 @@ func main() {
 	// The bridge is no longer a Plex API client — all Plex auth lives in the Python
 	// sync. PLEX_URL / PLEX_TOKEN env vars are accepted for backward compatibility
 	// with pre-Phase-E .gaende.env files but have no effect.
+	var diskImporter *disk.Importer
 	if database != nil && cfg.MusicBasePath != "" {
-		importer := disk.NewImporter(database.Pool, cfg, cfg.MusicBasePath)
-		importer.Start(ctx, 2*time.Minute)
+		diskImporter = disk.NewImporter(database.Pool, cfg, cfg.MusicBasePath)
+		diskImporter.Start(ctx, 2*time.Minute)
 		slog.Info("disk importer started", "webradio", cfg.MusicBasePath, "interval", "2m")
 	} else {
 		slog.Info("disk importer not configured — skipping (need DATABASE_URL + MUSIC_BASE_PATH)")
@@ -164,6 +165,9 @@ func main() {
 			// shape as "not_used" so downstream dashboards see an explicit signal
 			// rather than a silently-disappearing key.
 			"plex":        "not_used",
+			// Disk importer freshness — flags if the library_tracks ingest has
+			// stopped converging, which /health previously couldn't see.
+			"disk_sync": diskSyncStatus(diskImporter),
 		}
 		writeHealthResponse(w, checks, len(visibleStages))
 	})
@@ -377,6 +381,33 @@ func writeHealthResponse(w http.ResponseWriter, checks map[string]string, stageC
 	if err := json.NewEncoder(w).Encode(health); err != nil {
 		slog.Debug("health response write failed", "error", err)
 	}
+}
+
+// diskSyncStatus returns the /health check value for the disk importer.
+//   - "not_configured" if the importer wasn't wired (missing DATABASE_URL or MUSIC_BASE_PATH)
+//   - "never_ran"      if wired but no SyncOnce has completed yet (cold start)
+//   - "stale"          if last success was more than diskSyncStaleAfter ago
+//     (default 6 minutes = 3x the 2-minute poll interval, so a single skipped
+//     run doesn't trip the alarm but two in a row does)
+//   - "ok"             otherwise
+//
+// Post-Phase-E, this is the only signal that surfaces "library ingest stopped
+// working" — before, /health would happily say status:ok even if the importer
+// died at startup and the DB hadn't seen a new track in days.
+const diskSyncStaleAfter = 6 * time.Minute
+
+func diskSyncStatus(im *disk.Importer) string {
+	if im == nil {
+		return "not_configured"
+	}
+	last := im.LastSuccess()
+	if last.IsZero() {
+		return "never_ran"
+	}
+	if time.Since(last) > diskSyncStaleAfter {
+		return "stale"
+	}
+	return "ok"
 }
 
 // overallHealth collapses the per-check map into a single verdict.
