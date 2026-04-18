@@ -131,12 +131,14 @@ func (w *SyncWorker) syncPlaylist(ctx context.Context, playlist *Playlist, stage
 			addedAt = time.Now()
 		}
 
-		// Upsert: insert if new, update metadata if exists (catches re-tagged files in Plex).
-		// Note: a track can only belong to one stage. If the same file is in multiple
-		// Plex playlists, the last-synced playlist wins the stage_id assignment.
+		// Upsert library_tracks row (metadata), then upsert the (file_path, stage_id) pair
+		// into the join table. Post-002_track_stages: a file can belong to multiple stages,
+		// so we no longer silently lose memberships via "last-synced wins" on a scalar column.
+		// (This whole package is scheduled for deletion in Phase E; keeping it coherent here
+		// avoids runtime errors if PLEX_TOKEN ever gets set before the cutover.)
 		tag, err := w.db.Exec(ctx, `
-			INSERT INTO library_tracks (file_path, title, artist, album, genre, year, duration_sec, file_format, stage_id, plex_rating_key, plex_added_at, added_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+			INSERT INTO library_tracks (file_path, title, artist, album, genre, year, duration_sec, file_format, plex_rating_key, plex_added_at, added_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
 			ON CONFLICT (file_path) DO UPDATE SET
 				title = EXCLUDED.title,
 				artist = EXCLUDED.artist,
@@ -145,7 +147,6 @@ func (w *SyncWorker) syncPlaylist(ctx context.Context, playlist *Playlist, stage
 				year = EXCLUDED.year,
 				duration_sec = EXCLUDED.duration_sec,
 				file_format = EXCLUDED.file_format,
-				stage_id = EXCLUDED.stage_id,
 				plex_rating_key = EXCLUDED.plex_rating_key
 		`,
 			track.FilePath,
@@ -156,13 +157,21 @@ func (w *SyncWorker) syncPlaylist(ctx context.Context, playlist *Playlist, stage
 			nullIfZero(track.Year),
 			track.Duration/1000, // Plex sends milliseconds
 			track.Format,
-			stageID,
 			track.RatingKey,
 			addedAt,
 		)
 
 		if err != nil {
 			slog.Warn("plex sync: insert track failed", "file", track.FilePath, "error", err)
+			continue
+		}
+
+		if _, err := w.db.Exec(ctx, `
+			INSERT INTO track_stages (file_path, stage_id)
+			VALUES ($1, $2)
+			ON CONFLICT (file_path, stage_id) DO NOTHING
+		`, track.FilePath, stageID); err != nil {
+			slog.Warn("plex sync: track_stages insert failed", "file", track.FilePath, "stage", stageID, "error", err)
 			continue
 		}
 

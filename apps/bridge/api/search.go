@@ -37,25 +37,34 @@ func (h *SearchHandlers) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	// Search tracks
 	if searchType == "all" || searchType == "tracks" {
 		rows, err := h.DB.Query(r.Context(), `
-			SELECT id, title, artist, COALESCE(album, ''), COALESCE(stage_id, ''), COALESCE(genre, '')
-			FROM library_tracks
-			WHERE title ILIKE $1 OR artist ILIKE $1 OR album ILIKE $1
-			ORDER BY title
+			SELECT lt.id, lt.title, lt.artist, COALESCE(lt.album, ''),
+				COALESCE(
+					(SELECT array_agg(ts.stage_id ORDER BY ts.stage_id)
+					   FROM track_stages ts WHERE ts.file_path = lt.file_path),
+					ARRAY[]::text[]
+				) AS stage_ids,
+				COALESCE(lt.genre, '')
+			FROM library_tracks lt
+			WHERE lt.title ILIKE $1 OR lt.artist ILIKE $1 OR lt.album ILIKE $1
+			ORDER BY lt.title
 			LIMIT $2
 		`, pattern, limit)
 		if err == nil {
 			type trackResult struct {
-				ID      int64  `json:"id"`
-				Title   string `json:"title"`
-				Artist  string `json:"artist"`
-				Album   string `json:"album"`
-				StageID string `json:"stage_id"`
-				Genre   string `json:"genre"`
+				ID       int64    `json:"id"`
+				Title    string   `json:"title"`
+				Artist   string   `json:"artist"`
+				Album    string   `json:"album"`
+				StageIDs []string `json:"stage_ids"`
+				Genre    string   `json:"genre"`
 			}
 			tracks := make([]trackResult, 0)
 			for rows.Next() {
 				var t trackResult
-				rows.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.StageID, &t.Genre)
+				rows.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.StageIDs, &t.Genre)
+				if t.StageIDs == nil {
+					t.StageIDs = []string{}
+				}
 				tracks = append(tracks, t)
 			}
 			if err := rows.Err(); err != nil {

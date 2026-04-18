@@ -38,11 +38,12 @@ type ArtistDetail struct {
 }
 
 // ArtistTrack is a track belonging to an artist.
+// StageIDs is a list because a single file can belong to multiple stages.
 type ArtistTrack struct {
 	ID       int64     `json:"id"`
 	Title    string    `json:"title"`
 	Album    string    `json:"album"`
-	StageID  string    `json:"stage_id"`
+	StageIDs []string  `json:"stage_ids"`
 	Genre    string    `json:"genre"`
 	BPM      *int      `json:"bpm"`
 	Year     *int      `json:"year"`
@@ -185,10 +186,15 @@ func (h *ArtistsHandlers) HandleArtistTracks(w http.ResponseWriter, r *http.Requ
 	}
 
 	rows, queryErr := h.DB.Query(r.Context(), `
-		SELECT id, title, COALESCE(album, ''), COALESCE(stage_id, ''),
-			COALESCE(genre, ''), bpm, year, added_at
-		FROM library_tracks WHERE artist_id = $1
-		ORDER BY added_at DESC
+		SELECT lt.id, lt.title, COALESCE(lt.album, ''),
+			COALESCE(
+				(SELECT array_agg(ts.stage_id ORDER BY ts.stage_id)
+				   FROM track_stages ts WHERE ts.file_path = lt.file_path),
+				ARRAY[]::text[]
+			) AS stage_ids,
+			COALESCE(lt.genre, ''), lt.bpm, lt.year, lt.added_at
+		FROM library_tracks lt WHERE lt.artist_id = $1
+		ORDER BY lt.added_at DESC
 		LIMIT $2 OFFSET $3
 	`, id, pg.PerPage, pg.Offset)
 	if queryErr != nil {
@@ -200,9 +206,12 @@ func (h *ArtistsHandlers) HandleArtistTracks(w http.ResponseWriter, r *http.Requ
 	tracks := make([]ArtistTrack, 0)
 	for rows.Next() {
 		var t ArtistTrack
-		if err := rows.Scan(&t.ID, &t.Title, &t.Album, &t.StageID, &t.Genre, &t.BPM, &t.Year, &t.AddedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &t.Album, &t.StageIDs, &t.Genre, &t.BPM, &t.Year, &t.AddedAt); err != nil {
 			slog.Warn("artist tracks: scan error", "error", err)
 			continue
+		}
+		if t.StageIDs == nil {
+			t.StageIDs = []string{}
 		}
 		tracks = append(tracks, t)
 	}

@@ -14,14 +14,16 @@ type DiggingDay struct {
 }
 
 // DiggingTrack represents a track added on a specific date.
+// StageIDs is a list because a single file can belong to multiple stages
+// (e.g. etage-0 aggregates ETAGE 0 + Etage 0 - FAST DARK MINIMAL).
 type DiggingTrack struct {
-	ID      int64     `json:"id"`
-	Title   string    `json:"title"`
-	Artist  string    `json:"artist"`
-	Album   string    `json:"album"`
-	StageID string    `json:"stage_id"`
-	Genre   string    `json:"genre"`
-	AddedAt time.Time `json:"added_at"`
+	ID       int64     `json:"id"`
+	Title    string    `json:"title"`
+	Artist   string    `json:"artist"`
+	Album    string    `json:"album"`
+	StageIDs []string  `json:"stage_ids"`
+	Genre    string    `json:"genre"`
+	AddedAt  time.Time `json:"added_at"`
 }
 
 // DiggingStreaks holds streak calculations.
@@ -46,12 +48,14 @@ func (h *DiggingHandlers) HandleDiggingCalendar(w http.ResponseWriter, r *http.R
 	var query string
 	switch colorBy {
 	case "stage":
+		// A single track in multiple stages contributes to each stage's daily count.
 		query = `
-			SELECT DATE(added_at)::text, stage_id, COUNT(*)
-			FROM library_tracks
-			WHERE EXTRACT(YEAR FROM added_at) = $1
-			GROUP BY DATE(added_at), stage_id
-			ORDER BY DATE(added_at)
+			SELECT DATE(lt.added_at)::text, ts.stage_id, COUNT(*)
+			FROM library_tracks lt
+			JOIN track_stages ts ON ts.file_path = lt.file_path
+			WHERE EXTRACT(YEAR FROM lt.added_at) = $1
+			GROUP BY DATE(lt.added_at), ts.stage_id
+			ORDER BY DATE(lt.added_at)
 		`
 	default:
 		query = `
@@ -122,10 +126,16 @@ func (h *DiggingHandlers) HandleDiggingDate(w http.ResponseWriter, r *http.Reque
 
 	nextDay := date.Add(24 * time.Hour)
 	rows, queryErr := h.DB.Query(r.Context(), `
-		SELECT id, title, artist, COALESCE(album, ''), COALESCE(stage_id, ''), COALESCE(genre, ''), added_at
-		FROM library_tracks
-		WHERE added_at >= $1 AND added_at < $2
-		ORDER BY added_at
+		SELECT lt.id, lt.title, lt.artist, COALESCE(lt.album, ''),
+			COALESCE(
+				(SELECT array_agg(ts.stage_id ORDER BY ts.stage_id)
+				   FROM track_stages ts WHERE ts.file_path = lt.file_path),
+				ARRAY[]::text[]
+			) AS stage_ids,
+			COALESCE(lt.genre, ''), lt.added_at
+		FROM library_tracks lt
+		WHERE lt.added_at >= $1 AND lt.added_at < $2
+		ORDER BY lt.added_at
 	`, date, nextDay)
 	if queryErr != nil {
 		WriteError(w, http.StatusInternalServerError, "query failed")
@@ -136,9 +146,12 @@ func (h *DiggingHandlers) HandleDiggingDate(w http.ResponseWriter, r *http.Reque
 	tracks := make([]DiggingTrack, 0)
 	for rows.Next() {
 		var t DiggingTrack
-		if err := rows.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.StageID, &t.Genre, &t.AddedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.StageIDs, &t.Genre, &t.AddedAt); err != nil {
 			WriteError(w, http.StatusInternalServerError, "scan failed")
 			return
+		}
+		if t.StageIDs == nil {
+			t.StageIDs = []string{}
 		}
 		tracks = append(tracks, t)
 	}

@@ -71,11 +71,9 @@ func (h *StatsHandlers) HandleStatsTopArtists(w http.ResponseWriter, r *http.Req
 	argN := 0
 	nextArg := func() string { argN++; return fmt.Sprintf("$%d", argN) }
 
-	where := ""
-	if stage != "" {
-		where += " AND stage_id = " + nextArg()
-		args = append(args, stage)
-	}
+	// Period filter applies to different tables (library_tracks.added_at vs track_plays.played_at)
+	// depending on `by`; build it here so we can splice into each branch's query.
+	periodClause := ""
 	if period != "" {
 		var since time.Time
 		switch period {
@@ -89,9 +87,9 @@ func (h *StatsHandlers) HandleStatsTopArtists(w http.ResponseWriter, r *http.Req
 		if !since.IsZero() {
 			switch by {
 			case "tracks":
-				where += " AND added_at >= " + nextArg()
+				periodClause = " AND added_at >= " + nextArg()
 			default:
-				where += " AND played_at >= " + nextArg()
+				periodClause = " AND played_at >= " + nextArg()
 			}
 			args = append(args, since)
 		}
@@ -99,17 +97,28 @@ func (h *StatsHandlers) HandleStatsTopArtists(w http.ResponseWriter, r *http.Req
 
 	switch by {
 	case "tracks":
+		// Filter library_tracks by stage via the track_stages join table.
+		stageClause := ""
+		if stage != "" {
+			stageClause = " AND EXISTS (SELECT 1 FROM track_stages ts WHERE ts.file_path = library_tracks.file_path AND ts.stage_id = " + nextArg() + ")"
+			args = append(args, stage)
+		}
 		query = fmt.Sprintf(`
 			SELECT artist, COUNT(*) as count
-			FROM library_tracks WHERE 1=1 %s
+			FROM library_tracks WHERE 1=1 %s %s
 			GROUP BY artist ORDER BY count DESC LIMIT %d
-		`, where, limit)
-	default: // plays
+		`, stageClause, periodClause, limit)
+	default: // plays — track_plays.stage_id is still scalar (a play happens on one stage)
+		stageClause := ""
+		if stage != "" {
+			stageClause = " AND stage_id = " + nextArg()
+			args = append(args, stage)
+		}
 		query = fmt.Sprintf(`
 			SELECT artist, COUNT(*) as count
-			FROM track_plays WHERE 1=1 %s
+			FROM track_plays WHERE 1=1 %s %s
 			GROUP BY artist ORDER BY count DESC LIMIT %d
-		`, where, limit)
+		`, stageClause, periodClause, limit)
 	}
 
 	rows, err := h.DB.Query(r.Context(), query, args...)
@@ -251,7 +260,7 @@ func (h *StatsHandlers) HandleStatsBPM(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT bpm, COUNT(*) FROM library_tracks WHERE bpm IS NOT NULL AND bpm > 0`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
-		query += " AND stage_id = $1"
+		query += ` AND EXISTS (SELECT 1 FROM track_stages ts WHERE ts.file_path = library_tracks.file_path AND ts.stage_id = $1)`
 		args = append(args, stage)
 	}
 	query += " GROUP BY bpm ORDER BY bpm"
@@ -290,7 +299,7 @@ func (h *StatsHandlers) HandleStatsKeys(w http.ResponseWriter, r *http.Request) 
 	query := `SELECT camelot_key, COUNT(*) FROM library_tracks WHERE camelot_key IS NOT NULL`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
-		query += " AND stage_id = $1"
+		query += ` AND EXISTS (SELECT 1 FROM track_stages ts WHERE ts.file_path = library_tracks.file_path AND ts.stage_id = $1)`
 		args = append(args, stage)
 	}
 	query += " GROUP BY camelot_key ORDER BY camelot_key"
@@ -329,7 +338,7 @@ func (h *StatsHandlers) HandleStatsDecades(w http.ResponseWriter, r *http.Reques
 	query := `SELECT (year/10)*10 as decade, COUNT(*) FROM library_tracks WHERE year IS NOT NULL AND year > 0`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
-		query += " AND stage_id = $1"
+		query += ` AND EXISTS (SELECT 1 FROM track_stages ts WHERE ts.file_path = library_tracks.file_path AND ts.stage_id = $1)`
 		args = append(args, stage)
 	}
 	query += " GROUP BY decade ORDER BY decade"
@@ -368,7 +377,7 @@ func (h *StatsHandlers) HandleStatsGenres(w http.ResponseWriter, r *http.Request
 	query := `SELECT genre, COUNT(*) FROM library_tracks WHERE genre IS NOT NULL AND genre != ''`
 	args := []any{}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
-		query += " AND stage_id = $1"
+		query += ` AND EXISTS (SELECT 1 FROM track_stages ts WHERE ts.file_path = library_tracks.file_path AND ts.stage_id = $1)`
 		args = append(args, stage)
 	}
 	query += " GROUP BY genre ORDER BY COUNT(*) DESC"
