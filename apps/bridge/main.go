@@ -387,14 +387,22 @@ func writeHealthResponse(w http.ResponseWriter, checks map[string]string, stageC
 	}
 }
 
-// pgBackupStatus reports the freshness of the nightly pg-backup cron. Queries
-// pg_backup_log for the most recent row with status='ok' and compares against
-// pgBackupStaleAfter (30h by default — covers one missed nightly + some slack).
+// pgBackupStatus reports the freshness AND recent failure state of the nightly
+// pg-backup cron. We care about both signals: "latest ok is fresh" alone would
+// hide three consecutive failed nights until the 30h window expired.
+//
 //   - "not_configured" if the database isn't connected
 //   - "never_ran"      table exists but has no ok rows yet
-//   - "stale"          last ok row older than 30h — watchdog should alert
-//   - "ok"             otherwise
-const pgBackupStaleAfter = 30 * time.Hour
+//   - "failing"        the most recent row overall is status='failed' AND was
+//                      written within pgBackupFailureWindow — the cron tried
+//                      and failed recently, surface immediately
+//   - "stale"          last ok row older than pgBackupStaleAfter — watchdog
+//                      should alert (backups silently stopped)
+//   - "ok"             latest row is 'ok' and within the stale window
+const (
+	pgBackupStaleAfter    = 30 * time.Hour
+	pgBackupFailureWindow = 30 * time.Hour
+)
 
 func pgBackupStatus(ctx context.Context, database *db.DB) string {
 	if database == nil {
@@ -402,20 +410,36 @@ func pgBackupStatus(ctx context.Context, database *db.DB) string {
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	var lastOK *time.Time
+
+	// One query, two signals: (a) most recent row regardless of status, (b)
+	// most recent ok row. Scan both together.
+	var (
+		latestStatus *string
+		latestAt     *time.Time
+		lastOKAt     *time.Time
+	)
 	err := database.Pool.QueryRow(queryCtx, `
-		SELECT MAX(written_at) FROM pg_backup_log WHERE status = 'ok'
-	`).Scan(&lastOK)
+		SELECT
+			(SELECT status FROM pg_backup_log ORDER BY written_at DESC LIMIT 1),
+			(SELECT written_at FROM pg_backup_log ORDER BY written_at DESC LIMIT 1),
+			(SELECT MAX(written_at) FROM pg_backup_log WHERE status = 'ok')
+	`).Scan(&latestStatus, &latestAt, &lastOKAt)
 	if err != nil {
-		// Table missing (migration hasn't run) or DB query failed — report
-		// "never_ran" rather than "down" because the bridge itself is healthy;
-		// the backup cron just hasn't written anything yet.
+		// Table missing (migration hasn't run) or DB query failed.
 		return "never_ran"
 	}
-	if lastOK == nil {
+	if latestStatus == nil {
 		return "never_ran"
 	}
-	if time.Since(*lastOK) > pgBackupStaleAfter {
+	// Recent failure beats everything else — a fresh ok doesn't hide a
+	// last-night failure, and a stale ok doesn't hide a fresh failure either.
+	if *latestStatus == "failed" && latestAt != nil && time.Since(*latestAt) <= pgBackupFailureWindow {
+		return "failing"
+	}
+	if lastOKAt == nil {
+		return "never_ran"
+	}
+	if time.Since(*lastOKAt) > pgBackupStaleAfter {
 		return "stale"
 	}
 	return "ok"

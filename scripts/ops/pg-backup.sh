@@ -3,14 +3,11 @@
 #
 # Install as Whatbox cron: `0 3 * * * ~/gaende-radio/scripts/ops/pg-backup.sh`
 #
-# Dumps the gaende DB over the port-mapped connection (bypasses `podman exec`,
-# which has been flaky with crun-state corruption on this host), gzips to
-# ~/files/backups/pg/, rotates to 7 days, and writes a heartbeat row to the
-# pg_backup_log table so /health can surface "backups stopped working."
-#
-# Exit codes:
-#   0 — success, heartbeat written
-#   1 — dump failed (heartbeat still written with status=failed + error)
+# Dumps the gaende DB over the port-mapped connection via an ephemeral
+# postgres:16 container (Whatbox host pg_dump is v14 and refuses a v16
+# server; `podman exec gaende-postgres` has been flaky with crun-state
+# corruption). Gzips to BACKUP_DIR, rotates at RETENTION_DAYS, and writes a
+# heartbeat row to pg_backup_log so /health can surface "backups stopped."
 
 set -uo pipefail
 
@@ -25,49 +22,61 @@ export PGPASSWORD
 
 mkdir -p "$BACKUP_DIR"
 
+# mktemp-per-invocation stderr buffer so concurrent cron ticks (two runs on
+# different hours, or an admin kick overlapping with cron) don't trample each
+# other's error output or fall prey to a symlink at /tmp/pgdump.err.
+STDERR_FILE=$(mktemp /tmp/pg-backup-err.XXXXXX)
+trap 'rm -f "$STDERR_FILE"' EXIT
+
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 DUMP_PATH="$BACKUP_DIR/gaende-$TIMESTAMP.sql.gz"
-LOG_SQL=""
 
 log_heartbeat() {
-    # Write a row to pg_backup_log. Run inline so a DB failure during logging
-    # doesn't abort the script's exit code (backup itself may have succeeded).
+    # Writes one row to pg_backup_log. Uses psql parameterized variables
+    # (:'var') to avoid injection hazards from env-derived paths / error
+    # messages that might contain quotes or dollar-sign sequences.
     local status="$1" rows="$2" size="$3" path="$4" err="$5"
-    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=1 <<SQL || true
-INSERT INTO pg_backup_log (status, rows_dumped, size_bytes, backup_path, error)
-VALUES ('$status', NULLIF($rows, 0), NULLIF($size, 0), NULLIF('$path', ''), NULLIF(\$\$$err\$\$, ''));
-SQL
+    PGPASSWORD="$PGPASSWORD" psql -v ON_ERROR_STOP=1 -q \
+        -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" \
+        -v "h_status=$status" \
+        -v "h_rows=$rows" \
+        -v "h_size=$size" \
+        -v "h_path=$path" \
+        -v "h_err=$err" \
+        -c "INSERT INTO pg_backup_log (status, rows_dumped, size_bytes, backup_path, error)
+            VALUES (
+                :'h_status',
+                NULLIF(:'h_rows','')::bigint,
+                NULLIF(:'h_size','')::bigint,
+                NULLIF(:'h_path',''),
+                NULLIF(:'h_err','')
+            );" 2>&1 || echo "pg-backup: heartbeat write failed (non-fatal)" >&2
 }
 
-# --- Dump.
-# Use an ephemeral pg-16 container so the version matches the server exactly;
-# Whatbox ships pg_dump v14 which refuses to dump a v16 server. `podman exec
-# gaende-postgres` has been flaky with crun-state corruption on this host, so
-# `podman run --rm --network host` is the reliable path.
+# --- Dump via ephemeral pg-16 container.
 DUMP_CMD=(
     podman run --rm --network host
     -e PGPASSWORD="$PGPASSWORD"
     docker.io/library/postgres:16-alpine
     pg_dump -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" --no-owner --no-acl "$PGDB"
 )
-if ! "${DUMP_CMD[@]}" 2>/tmp/pgdump.err | gzip -6 > "$DUMP_PATH.tmp"; then
-    err=$(tr '\n' ' ' < /tmp/pgdump.err | head -c 500)
-    log_heartbeat "failed" 0 0 "" "$err"
+if ! "${DUMP_CMD[@]}" 2>"$STDERR_FILE" | gzip -6 > "$DUMP_PATH.tmp"; then
+    err=$(tr '\n' ' ' < "$STDERR_FILE" | head -c 500)
+    log_heartbeat "failed" "" "" "" "$err"
     echo "pg-backup: dump failed — $err" >&2
     rm -f "$DUMP_PATH.tmp"
     exit 1
 fi
 mv "$DUMP_PATH.tmp" "$DUMP_PATH"
 
-# Quick sanity: `gzip -t` must succeed and the file must be non-empty.
+# Sanity: gzip -t must pass before we call the backup "ok".
 if ! gzip -t "$DUMP_PATH" 2>/dev/null; then
-    log_heartbeat "failed" 0 0 "$DUMP_PATH" "corrupt gzip archive"
+    log_heartbeat "failed" "" "" "$DUMP_PATH" "corrupt gzip archive"
     echo "pg-backup: produced corrupt archive at $DUMP_PATH" >&2
     exit 1
 fi
 
 SIZE=$(stat -c %s "$DUMP_PATH")
-# Count rows by grepping COPY blocks (cheaper than a full restore probe).
 ROWS=$(zgrep -c '^COPY ' "$DUMP_PATH" 2>/dev/null || echo 0)
 
 log_heartbeat "ok" "$ROWS" "$SIZE" "$DUMP_PATH" ""
