@@ -2,6 +2,7 @@ package mpd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -22,11 +23,32 @@ type NowPlaying struct {
 	Error    string            `json:"error,omitempty"`
 }
 
+// defaultCmdTimeout bounds every blocking MPD command. Shared hosting NAT can silently
+// drop long-lived connections; without a per-call ceiling a single bad socket would
+// wedge every caller waiting on ioMu forever.
+const defaultCmdTimeout = 5 * time.Second
+
+// watcherIdleTimeout — if no events on a watcher for this long, assume the underlying
+// idle socket has zombied (gompd's Read goroutine blocked with no error) and force a
+// full reset: mark the main connection dead, close it, rebuild on the next loop iteration.
+// 10 min is comfortably above any realistic track length; false positives only cost a reconnect.
+const watcherIdleTimeout = 10 * time.Minute
+
 // Conn wraps a single MPD connection for one stage.
+//
+// Concurrency model:
+//
+//   - `mu` protects the `client` pointer and `alive` flag — always short-held,
+//     never wraps a blocking call.
+//   - `ioMu` serializes MPD protocol commands on `client` (gompd's protocol is
+//     single-connection request/response and racing calls interleaves frames).
+//     Held only by `withClient`; every call inside it is guarded by `callWithTimeout`
+//     so a hung Read can't wedge the mutex queue.
 type Conn struct {
 	Stage  config.StageConfig
 	client *gompd.Client
 	mu     sync.Mutex
+	ioMu   sync.Mutex
 	alive  bool
 }
 
@@ -51,7 +73,7 @@ func NewPool(stages []config.StageConfig, onChange func(NowPlaying)) *Pool {
 	return p
 }
 
-// ConnectAll attempts to connect to every MPD instance.
+// ConnectAll attempts to connect to every MPD instance concurrently.
 // Returns the number of successful connections.
 func (p *Pool) ConnectAll(host string) int {
 	var wg sync.WaitGroup
@@ -91,10 +113,14 @@ func (p *Pool) NowPlaying(stageID string) NowPlaying {
 // AllNowPlaying returns now-playing for all stages.
 func (p *Pool) AllNowPlaying() []NowPlaying {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
+	conns := make([]*Conn, 0, len(p.conns))
+	for _, c := range p.conns {
+		conns = append(conns, c)
+	}
+	p.mu.RUnlock()
 
-	result := make([]NowPlaying, 0, len(p.conns))
-	for _, conn := range p.conns {
+	result := make([]NowPlaying, 0, len(conns))
+	for _, conn := range conns {
 		result = append(result, conn.nowPlaying())
 	}
 	return result
@@ -116,15 +142,20 @@ func (p *Pool) StartWatchers(ctx context.Context, host string) {
 }
 
 // Close disconnects all MPD connections and stops all watchers.
+//
+// Order matters: we close the clients FIRST (outside any mutex), which causes
+// any blocked Read/Write in the watcher goroutines to return immediately with
+// an error. Then we cancel the context and wait for the goroutines to exit.
+// Waiting on p.wg.Wait before closing would let a stuck I/O call deadlock shutdown.
 func (p *Pool) Close() {
+	// Step 1: cancel context (watcher select statements notice).
 	if p.cancel != nil {
 		p.cancel()
 	}
-	p.wg.Wait() // Wait for all watcher goroutines to exit
 
+	// Step 2: detach + close every client outside any lock. Closing a connection
+	// whose Read is blocked unblocks it with io.ErrClosed, letting the goroutine exit.
 	for _, c := range p.conns {
-		// Detach the client under the mutex, then close it without the mutex held —
-		// Close on a TCP connection that's stuck in Read can itself block indefinitely.
 		c.mu.Lock()
 		client := c.client
 		c.client = nil
@@ -134,6 +165,9 @@ func (p *Pool) Close() {
 			_ = client.Close()
 		}
 	}
+
+	// Step 3: now that clients are gone, watchers will exit promptly.
+	p.wg.Wait()
 }
 
 // IsAlive returns whether a stage's MPD connection is active.
@@ -149,8 +183,9 @@ func (p *Pool) IsAlive(stageID string) bool {
 	return conn.alive
 }
 
+// connect replaces the current MPD client with a freshly-dialed one.
+// Old client is closed outside the state mutex.
 func (c *Conn) connect(addr string) error {
-	// Detach any existing client under the mutex, close it outside.
 	c.mu.Lock()
 	oldClient := c.client
 	c.client = nil
@@ -160,7 +195,6 @@ func (c *Conn) connect(addr string) error {
 		_ = oldClient.Close()
 	}
 
-	// gompd.Dial will fail naturally if the port is unreachable.
 	client, err := gompd.Dial("tcp", addr)
 	if err != nil {
 		return err
@@ -173,43 +207,93 @@ func (c *Conn) connect(addr string) error {
 	return nil
 }
 
-func (c *Conn) nowPlaying() NowPlaying {
-	// Snapshot under the mutex, then release it before any blocking network I/O.
-	// Holding c.mu across Status()/Ping()/CurrentSong() froze entire stages for weeks
-	// in 2026-03 when a TCP Read never returned (silent NAT drop on shared hosting).
+// markDead forces the connection into a disconnected state and closes the
+// client outside the state mutex. Safe to call from any goroutine. Idempotent.
+// If `expected` is non-nil, only mark dead if c.client still matches it
+// (CAS-style — avoids nullifying a fresh client a reconnect just swapped in).
+func (c *Conn) markDead(expected *gompd.Client) {
+	c.mu.Lock()
+	if expected != nil && c.client != expected {
+		c.mu.Unlock()
+		return
+	}
+	client := c.client
+	c.client = nil
+	c.alive = false
+	c.mu.Unlock()
+	if client != nil {
+		// Close can block on a hung socket; fire-and-forget. Worst case is one
+		// leaked goroutine per stuck connection (bounded at 9).
+		go client.Close()
+	}
+}
+
+// withClient serializes an MPD command on client, bounded by defaultCmdTimeout.
+// Returns (false, nil) if the connection isn't alive or if client was swapped
+// while we waited for ioMu. Returns (true, err) if the command completed.
+//
+// The timeout matters: without it, a Read blocked on a silently-dead TCP socket
+// holds ioMu forever, and every subsequent caller queues behind it — same
+// failure mode as the original mutex-across-I/O bug, just moved one layer out.
+func (c *Conn) withClient(fn func(*gompd.Client) error) (ok bool, err error) {
 	c.mu.Lock()
 	client := c.client
 	alive := c.alive
-	stageID := c.Stage.ID
 	c.mu.Unlock()
-
-	np := NowPlaying{StageID: stageID}
-
 	if client == nil || !alive {
+		return false, nil
+	}
+
+	c.ioMu.Lock()
+	defer c.ioMu.Unlock()
+
+	// Re-validate: another goroutine may have swapped the client while we waited.
+	c.mu.Lock()
+	same := c.client == client && c.alive
+	c.mu.Unlock()
+	if !same {
+		return false, nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- fn(client) }()
+
+	select {
+	case err = <-done:
+		if err != nil {
+			return true, err
+		}
+		return true, nil
+	case <-time.After(defaultCmdTimeout):
+		// Timeout — mark dead so the next watcher iteration reconnects.
+		c.markDead(client)
+		return true, errors.New("mpd command timeout")
+	}
+}
+
+func (c *Conn) nowPlaying() NowPlaying {
+	np := NowPlaying{StageID: c.Stage.ID}
+
+	var status map[string]string
+	ok, err := c.withClient(func(client *gompd.Client) error {
+		var e error
+		status, e = client.Status()
+		return e
+	})
+	if !ok {
 		np.Status = "offline"
 		np.Error = "not connected"
 		return np
 	}
-
-	status, err := client.Status()
 	if err != nil {
-		// Try a ping before declaring dead — could be a transient error.
-		if pingErr := client.Ping(); pingErr != nil {
-			np.Status = "error"
-			np.Error = err.Error()
-			// Compare-and-swap: only null out c.client if it's still the same one we read.
-			// A parallel reconnect() may have already replaced it with a healthy connection.
+		// Probe with Ping; a transient error doesn't warrant killing the connection.
+		_, pingErr := c.withClient(func(client *gompd.Client) error { return client.Ping() })
+		if pingErr != nil {
 			c.mu.Lock()
-			if c.client == client {
-				c.alive = false
-				c.client = nil
-			}
+			client := c.client
 			c.mu.Unlock()
-			// Close outside the mutex — Close on a hung TCP conn can itself block.
-			_ = client.Close()
-			return np
+			c.markDead(client)
 		}
-		// Ping succeeded — transient, don't kill the connection.
 		np.Status = "error"
 		np.Error = err.Error()
 		return np
@@ -219,25 +303,27 @@ func (c *Conn) nowPlaying() NowPlaying {
 	np.Elapsed = status["elapsed"]
 	np.Duration = status["duration"]
 
-	song, err := client.CurrentSong()
-	if err != nil {
-		np.Error = err.Error()
+	var song map[string]string
+	_, songErr := c.withClient(func(client *gompd.Client) error {
+		var e error
+		song, e = client.CurrentSong()
+		return e
+	})
+	if songErr != nil {
+		np.Error = songErr.Error()
 		return np
 	}
 	np.Song = song
-
 	return np
 }
 
 // watchLoop watches for MPD player changes using idle-based notifications.
-// It reuses a single watcher per stage instead of creating/destroying on each event.
 // Exits when ctx is cancelled.
 func (p *Pool) watchLoop(ctx context.Context, conn *Conn, host string) {
 	addr := fmt.Sprintf("%s:%d", host, conn.Stage.MPDPort)
 	var lastSong string
 
 	for {
-		// Check for shutdown
 		select {
 		case <-ctx.Done():
 			return
@@ -249,13 +335,12 @@ func (p *Pool) watchLoop(ctx context.Context, conn *Conn, host string) {
 		conn.mu.Unlock()
 
 		if !alive {
-			// Reconnect with exponential backoff, respecting context
 			if !p.reconnect(ctx, conn, addr) {
-				return // context cancelled during reconnect
+				return
 			}
 		}
 
-		// Get current state and notify if changed
+		// Emit current state at least once per connection so snapshots stay fresh.
 		np := conn.nowPlaying()
 		songKey := np.Song["file"]
 		if songKey != lastSong && songKey != "" {
@@ -265,7 +350,7 @@ func (p *Pool) watchLoop(ctx context.Context, conn *Conn, host string) {
 			}
 		}
 
-		// Create a watcher and reuse it for multiple events
+		// Create a watcher on its own dedicated socket (independent from conn.client).
 		watcher, err := gompd.NewWatcher("tcp", addr, "", "player")
 		if err != nil {
 			slog.Warn("mpd watcher failed", "stage", conn.Stage.ID, "error", err)
@@ -277,33 +362,53 @@ func (p *Pool) watchLoop(ctx context.Context, conn *Conn, host string) {
 			}
 		}
 
-		// Wait for events from this watcher until it errors or context cancels
 		p.drainWatcher(ctx, watcher, conn, &lastSong)
-		watcher.Close()
+		_ = watcher.Close()
 	}
 }
 
-// drainWatcher reads events from a watcher until error, context cancellation, or
-// the watchdog fires. The watchdog guards against gompd's internal read goroutine
-// blocking forever on a silently-dead TCP connection (no FIN, no RST, no error) —
-// which is what froze every stage for weeks in 2026-03.
+// drainWatcher reads events from a watcher until context cancellation, watcher
+// error, or the idle watchdog fires.
+//
+// On watchdog: we mark conn dead and close the main client. Otherwise the outer
+// loop would immediately call nowPlaying() on the same dead socket and wedge
+// again — the failure that kept the bridge stalled for 22 days in 2026-03.
+//
+// Uses a single shared timer rather than `time.After` per select iteration so
+// expired timers don't pile up on high-traffic stages.
 func (p *Pool) drainWatcher(ctx context.Context, watcher *gompd.Watcher, conn *Conn, lastSong *string) {
-	// 10 min is comfortably above any realistic track length. False positives only
-	// cost one watcher recreate + reconnect (a few seconds on healthy infra).
-	const watcherIdleTimeout = 10 * time.Minute
+	timer := time.NewTimer(watcherIdleTimeout)
+	defer timer.Stop()
+
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(watcherIdleTimeout)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(watcherIdleTimeout):
+		case <-timer.C:
 			slog.Warn("mpd watcher idle timeout, resetting", "stage", conn.Stage.ID, "after", watcherIdleTimeout)
+			// Force a full reconnect: the main client may share the same NAT state as
+			// the watcher's silently-dead socket, so killing it too lets the outer loop
+			// reconnect cleanly on its next iteration.
+			conn.mu.Lock()
+			client := conn.client
+			conn.mu.Unlock()
+			conn.markDead(client)
 			return
 		case _, ok := <-watcher.Event:
 			if !ok {
-				return // channel closed
+				return
 			}
-			// Track changed — get new state and notify.
+			resetTimer()
 			np := conn.nowPlaying()
 			songKey := np.Song["file"]
 			if songKey != *lastSong && songKey != "" {
@@ -314,13 +419,12 @@ func (p *Pool) drainWatcher(ctx context.Context, watcher *gompd.Watcher, conn *C
 			}
 		case err := <-watcher.Error:
 			slog.Warn("mpd watcher error", "stage", conn.Stage.ID, "error", err)
-			return // will recreate watcher on next loop iteration
+			return
 		}
 	}
 }
 
-// reconnect attempts to reconnect with exponential backoff.
-// Returns false if ctx is cancelled (caller should exit).
+// reconnect loops with exponential backoff until it succeeds or ctx is cancelled.
 func (p *Pool) reconnect(ctx context.Context, conn *Conn, addr string) bool {
 	for delay := time.Second; ; delay = min(delay*2, 30*time.Second) {
 		slog.Info("mpd reconnecting", "stage", conn.Stage.ID, "delay", delay)

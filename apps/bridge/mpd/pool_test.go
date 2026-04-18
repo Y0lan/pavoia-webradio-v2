@@ -1,7 +1,10 @@
 package mpd
 
 import (
+	"sync"
 	"testing"
+
+	gompd "github.com/fhs/gompd/v2/mpd"
 
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/config"
 )
@@ -99,4 +102,57 @@ func TestConnectAllNoServer(t *testing.T) {
 	if connected != 0 {
 		t.Fatalf("expected 0 connections, got %d", connected)
 	}
+}
+
+// TestMarkDeadWhenNoClient exercises the idempotent-when-empty path. This is the
+// call pattern used by the watchdog + error handling code — they shouldn't crash
+// or deadlock when the connection is already gone.
+func TestMarkDeadWhenNoClient(t *testing.T) {
+	c := &Conn{Stage: config.StageConfig{ID: "stage"}, alive: true}
+	c.markDead(nil)
+	if c.alive {
+		t.Fatal("expected alive=false after markDead")
+	}
+	if c.client != nil {
+		t.Fatal("expected client=nil after markDead")
+	}
+	// Second call is a no-op, must not panic or block.
+	c.markDead(nil)
+}
+
+// TestWithClientOfflineReturnsFalse verifies that withClient short-circuits
+// when the connection is down. This is the fast path used by HTTP handlers
+// so a dead stage doesn't block any of its siblings.
+func TestWithClientOfflineReturnsFalse(t *testing.T) {
+	c := &Conn{Stage: config.StageConfig{ID: "stage"}}
+	called := false
+	ok, err := c.withClient(func(client *gompd.Client) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false when offline")
+	}
+	if called {
+		t.Fatal("fn must not be invoked when offline")
+	}
+}
+
+// TestConcurrentNowPlayingNoDataRace exercises the two-mutex pattern under -race.
+// If we ever reintroduce racy access to Conn.client / Conn.alive, the Go race
+// detector will catch it here.
+func TestConcurrentNowPlayingNoDataRace(t *testing.T) {
+	stages := []config.StageConfig{{ID: "s", MPDPort: 6600}}
+	pool := NewPool(stages, nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = pool.IsAlive("s") }()
+		go func() { defer wg.Done(); _ = pool.NowPlaying("s") }()
+	}
+	wg.Wait()
 }
