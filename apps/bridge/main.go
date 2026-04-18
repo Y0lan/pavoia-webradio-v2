@@ -411,20 +411,18 @@ func pgBackupStatus(ctx context.Context, database *db.DB) string {
 	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	// Decision table for /health.pg_backup:
+	// Decision table for /health.pg_backup. Uses pgBackupStaleAfter (30h) as
+	// both the "ok window" and the "still-a-recent-failure" window so a slow
+	// or slightly-delayed nightly cron doesn't flip to stale prematurely.
 	//
-	//   lastOK recent (< okWindow)    → "ok"  (a manual failure after a clean
-	//                                   nightly run is not an ops concern; the
-	//                                   cron is still converging)
-	//   lastOK stale (> okWindow)     → "failing" if lastFailed within
-	//                                   failureWindow, else "stale"
-	//   no lastOK but recent lastFail → "failing"
-	//   no rows at all                → "never_ran"
+	//   1. lastOK within 30h                        → "ok"
+	//   2. lastFailed AFTER lastOK AND within 30h   → "failing" (recent
+	//                                                 convergence failure)
+	//   3. any row exists (lastOK or lastFailed)    → "stale"
+	//   4. no rows at all                           → "never_ran"
 	//
-	// okWindow is 24h — the nightly cron's own interval. failureWindow is 30h
-	// so a last-failed row from an hour before the missed nightly still counts.
-	const okWindow = 24 * time.Hour
-
+	// Rule 2 requires the failure to be newer than the ok — a failure from T-29h
+	// with a success at T-25h is a recovered state, not an active failure.
 	var lastOKAt, lastFailedAt *time.Time
 	err := database.Pool.QueryRow(queryCtx, `
 		SELECT
@@ -438,20 +436,19 @@ func pgBackupStatus(ctx context.Context, database *db.DB) string {
 		return "never_ran"
 	}
 
-	// Recent ok dominates: a successful nightly within the last 24h means the
-	// cron is working, regardless of what manual invocations did afterwards.
-	if lastOKAt != nil && time.Since(*lastOKAt) <= okWindow {
+	// 1. Recent successful backup dominates.
+	if lastOKAt != nil && time.Since(*lastOKAt) <= pgBackupStaleAfter {
 		return "ok"
 	}
 
-	// No recent ok. If there's a recent failure, surface it urgently;
-	// otherwise it's silent-stopped (stale).
-	if lastFailedAt != nil && time.Since(*lastFailedAt) <= pgBackupFailureWindow {
+	// 2. Recent failure that's NEWER than the last ok (if any).
+	if lastFailedAt != nil &&
+		time.Since(*lastFailedAt) <= pgBackupFailureWindow &&
+		(lastOKAt == nil || lastFailedAt.After(*lastOKAt)) {
 		return "failing"
 	}
-	if lastOKAt == nil {
-		return "never_ran"
-	}
+
+	// 3. Any row exists but nothing is fresh — silent stop.
 	return "stale"
 }
 
