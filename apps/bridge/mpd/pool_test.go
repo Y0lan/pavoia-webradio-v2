@@ -3,6 +3,7 @@ package mpd
 import (
 	"sync"
 	"testing"
+	"time"
 
 	gompd "github.com/fhs/gompd/v2/mpd"
 
@@ -155,4 +156,121 @@ func TestConcurrentNowPlayingNoDataRace(t *testing.T) {
 		go func() { defer wg.Done(); _ = pool.NowPlaying("s") }()
 	}
 	wg.Wait()
+}
+
+// TestIsAliveStrict verifies IsAlive is the strict "main client queryable now"
+// signal — it does NOT fall back to watcher freshness. /api/stages uses this
+// field and must see it flip to false the moment the main client is dead, so
+// the frontend can correctly flag a stage as unqueryable. Watcher-based
+// liveness for /health lives on HasRecentActivity (see tests below).
+func TestIsAliveStrict(t *testing.T) {
+	stages := []config.StageConfig{{ID: "s", MPDPort: 6600}}
+	pool := NewPool(stages, nil)
+	conn := pool.conns["s"]
+
+	// Simulate a fresh watcher event; IsAlive should still report false
+	// because the main client was markDead'd.
+	conn.mu.Lock()
+	conn.alive = false
+	conn.client = nil
+	conn.mu.Unlock()
+	conn.lastEventAtNanos.Store(time.Now().UnixNano())
+	if pool.IsAlive("s") {
+		t.Fatal("IsAlive must be strict about main-client state, not watcher freshness")
+	}
+
+	// Main client revived → IsAlive true.
+	conn.mu.Lock()
+	conn.alive = true
+	conn.mu.Unlock()
+	if !pool.IsAlive("s") {
+		t.Fatal("expected IsAlive=true when main client is alive")
+	}
+}
+
+// TestHasRecentActivity_WatcherFallback guards the Phase-F /health regression
+// fix. Scenario: the main client gets markDead'd (HTTP probe timeout, MPD
+// connection_timeout, whatever) BUT the watcher's separate socket is still
+// delivering events. HasRecentActivity should report true because the stage
+// is producing real data — saying "down" in this state was the Phase-F
+// false-negative.
+func TestHasRecentActivity_WatcherFallback(t *testing.T) {
+	stages := []config.StageConfig{{ID: "s", MPDPort: 6600}}
+	pool := NewPool(stages, nil)
+	conn := pool.conns["s"]
+
+	conn.mu.Lock()
+	conn.alive = false
+	conn.client = nil
+	conn.mu.Unlock()
+	conn.lastEventAtNanos.Store(time.Now().UnixNano())
+
+	if !pool.HasRecentActivity("s") {
+		t.Fatal("expected HasRecentActivity=true when watcher event is fresh")
+	}
+}
+
+// TestHasRecentActivity_StaleEvent — if the watcher's last event is older
+// than eventFreshnessWindow, the fallback no longer rescues the stage.
+// A genuinely-stuck watcher still reports dead.
+func TestHasRecentActivity_StaleEvent(t *testing.T) {
+	stages := []config.StageConfig{{ID: "s", MPDPort: 6600}}
+	pool := NewPool(stages, nil)
+	conn := pool.conns["s"]
+
+	conn.mu.Lock()
+	conn.alive = false
+	conn.mu.Unlock()
+	// Event from 20 minutes ago — well past the 9-minute window.
+	conn.lastEventAtNanos.Store(time.Now().Add(-20 * time.Minute).UnixNano())
+
+	if pool.HasRecentActivity("s") {
+		t.Fatal("expected HasRecentActivity=false when last event is stale (>9m)")
+	}
+}
+
+// TestHasRecentActivity_NeverHadEvent — a brand-new conn that never produced
+// an event is dead when alive=false, regardless of clock (lastEventAtNanos=0).
+func TestHasRecentActivity_NeverHadEvent(t *testing.T) {
+	stages := []config.StageConfig{{ID: "s", MPDPort: 6600}}
+	pool := NewPool(stages, nil)
+	conn := pool.conns["s"]
+	conn.mu.Lock()
+	conn.alive = false
+	conn.mu.Unlock()
+	if pool.HasRecentActivity("s") {
+		t.Fatal("expected HasRecentActivity=false when no event has ever been recorded")
+	}
+}
+
+// TestHasRecentActivity_MainClientWins — if the main client is alive,
+// HasRecentActivity should return true regardless of the event timestamp
+// (initial connect/reconnect path, before the first track-change event).
+func TestHasRecentActivity_MainClientWins(t *testing.T) {
+	stages := []config.StageConfig{{ID: "s", MPDPort: 6600}}
+	pool := NewPool(stages, nil)
+	conn := pool.conns["s"]
+	conn.mu.Lock()
+	conn.alive = true
+	conn.mu.Unlock()
+	// No event recorded — but alive=true should dominate.
+	if !pool.HasRecentActivity("s") {
+		t.Fatal("expected HasRecentActivity=true when main client is alive")
+	}
+}
+
+// TestEventFreshnessWindowBelowWatchdog guards the invariant that the
+// watcher-freshness fallback must expire BEFORE the watchdog idle timeout,
+// so a genuinely-dead watcher eventually gets reconnected instead of
+// indefinitely claiming liveness from a stale timestamp. Codex round-1 on
+// the P0 fix caught the 15m>10m inversion; this test locks that ordering in.
+func TestEventFreshnessWindowBelowWatchdog(t *testing.T) {
+	if eventFreshnessWindow >= watcherIdleTimeout {
+		t.Fatalf(
+			"eventFreshnessWindow (%v) must be < watcherIdleTimeout (%v); "+
+				"otherwise HasRecentActivity reports alive for a stage whose "+
+				"watcher is already being killed by the watchdog",
+			eventFreshnessWindow, watcherIdleTimeout,
+		)
+	}
 }

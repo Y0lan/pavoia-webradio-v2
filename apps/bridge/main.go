@@ -510,9 +510,13 @@ func overallHealth(checks map[string]string) string {
 }
 
 func mpdHealthStatus(pool *mpdpool.Pool, stages []config.StageConfig) string {
+	// Use HasRecentActivity (not IsAlive) so /health counts a stage as up when
+	// its watcher socket is producing events, even if the main client briefly
+	// looks dead to HTTP probes (MPD 60s server connection_timeout, etc.).
+	// /api/stages stays on the stricter IsAlive for per-stage "queryable now".
 	aliveCount := 0
 	for _, s := range stages {
-		if pool.IsAlive(s.ID) {
+		if pool.HasRecentActivity(s.ID) {
 			aliveCount++
 		}
 	}

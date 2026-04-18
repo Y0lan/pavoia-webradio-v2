@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gompd "github.com/fhs/gompd/v2/mpd"
@@ -50,7 +51,44 @@ type Conn struct {
 	mu     sync.Mutex
 	ioMu   sync.Mutex
 	alive  bool
+
+	// lastEventAtNanos — the last time the watcher on this stage produced a
+	// real track-change event inside drainWatcher. Read atomically by
+	// HasRecentActivity (which /health uses) so the check can surface
+	// "watcher is producing events" even when the MAIN client got markDead'd
+	// by an HTTP timeout or by MPD's 60s server-side connection_timeout — the
+	// watcher owns its own TCP connection (see drainWatcher), independent
+	// from conn.client.
+	//
+	// Only bumped from drainWatcher's event case, NEVER from the initial
+	// state emit at watchLoop entry — that runs before gompd.NewWatcher opens
+	// the watcher socket, so bumping there would silently record freshness
+	// for a never-alive watcher.
+	//
+	// Zero when a conn has never produced an event. After eventFreshnessWindow
+	// without an event, HasRecentActivity falls back to the mu-guarded `alive`
+	// field and reports whatever the main client's actual state is.
+	//
+	// IsAlive does NOT consult this field — it's the strict "main client
+	// queryable right now" signal and /api/stages depends on that strictness.
+	lastEventAtNanos atomic.Int64
 }
+
+// eventFreshnessWindow — how long the last watcher event counts as liveness
+// for HasRecentActivity (the /health signal). Must be strictly LESS than
+// watcherIdleTimeout so a dead watcher eventually falls through to the
+// watchdog instead of indefinitely claiming liveness. 9m gives a 1-minute
+// "genuinely dead" signal between fallback expiry and watchdog-driven
+// reconnect — acceptable for /health's purpose of "is the bridge doing its
+// job" (playback itself keeps working during that minute; this is about
+// monitoring resolution).
+//
+// Tracks longer than the window exist (live DJ sets on bermuda-night and
+// closing can run ~10 min). During such a track a stage may briefly report
+// "degraded" even though the stream is fine. That's preferred over running
+// the window past watcherIdleTimeout, which silently hides genuinely-dead
+// watchers for 5 minutes after the watchdog already decided they were dead.
+const eventFreshnessWindow = 9 * time.Minute
 
 // Pool manages connections to all MPD instances.
 type Pool struct {
@@ -170,7 +208,11 @@ func (p *Pool) Close() {
 	p.wg.Wait()
 }
 
-// IsAlive returns whether a stage's MPD connection is active.
+// IsAlive returns whether a stage's MAIN MPD client can answer a query right
+// now. This is the strict "queryable-at-this-instant" signal, used by
+// /api/stages so the UI accurately knows whether a nowPlaying fetch for that
+// stage would produce live data. Does NOT fall back to watcher freshness —
+// for that (service-level liveness), use HasRecentActivity.
 func (p *Pool) IsAlive(stageID string) bool {
 	p.mu.RLock()
 	conn, ok := p.conns[stageID]
@@ -181,6 +223,46 @@ func (p *Pool) IsAlive(stageID string) bool {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	return conn.alive
+}
+
+// HasRecentActivity returns whether a stage is healthy enough to count as
+// "serving" for monitoring purposes. This is the OR of two independent
+// signals:
+//
+//  1. The main MPD client is marked alive (state reads work right now).
+//  2. The watcher has produced an event within eventFreshnessWindow (even if
+//     the main client was temporarily markDead'd by an HTTP timeout or by
+//     MPD's 60s server-side connection_timeout, the watcher's separate socket
+//     is clearly delivering).
+//
+// This is what /health uses for its mpd check. It's deliberately more
+// permissive than IsAlive — the radio stream can still serve listeners while
+// the main client is briefly dead, and /health's job is to page ops when the
+// service can't do its job, not when a request-path client is briefly stale.
+//
+// Fixes the Phase F false-negative where /api/stages calls against the main
+// client could markDead all 9 connections while the radio streams kept
+// serving unbroken.
+func (p *Pool) HasRecentActivity(stageID string) bool {
+	p.mu.RLock()
+	conn, ok := p.conns[stageID]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	conn.mu.Lock()
+	alive := conn.alive
+	conn.mu.Unlock()
+	if alive {
+		return true
+	}
+	// Watcher-liveness fallback. Atomic.Int64 read so this stays fast under
+	// /health load without touching the state mutex.
+	last := conn.lastEventAtNanos.Load()
+	if last == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, last)) <= eventFreshnessWindow
 }
 
 // connect replaces the current MPD client with a freshly-dialed one.
@@ -341,6 +423,12 @@ func (p *Pool) watchLoop(ctx context.Context, conn *Conn, host string) {
 		}
 
 		// Emit current state at least once per connection so snapshots stay fresh.
+		// Note: we do NOT bump lastEventAtNanos here. The initial state emit
+		// happens BEFORE gompd.NewWatcher even attempts to open the watcher
+		// socket, so a fresh timestamp would be recorded for stages whose
+		// watcher socket never actually came up — that would silently mask a
+		// real outage. lastEventAtNanos is only bumped in drainWatcher's event
+		// case, where we have positive proof the watcher socket delivered.
 		np := conn.nowPlaying()
 		songKey := np.Song["file"]
 		if songKey != lastSong && songKey != "" {
@@ -409,6 +497,11 @@ func (p *Pool) drainWatcher(ctx context.Context, watcher *gompd.Watcher, conn *C
 				return
 			}
 			resetTimer()
+			// Any watcher event — even one that can't produce a useful np
+			// (e.g. nowPlaying returned "offline" because main client is
+			// mid-reconnect) — is a liveness signal. The watcher's separate
+			// socket is clearly functioning.
+			conn.lastEventAtNanos.Store(time.Now().UnixNano())
 			np := conn.nowPlaying()
 			songKey := np.Song["file"]
 			if songKey != *lastSong && songKey != "" {
