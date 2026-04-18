@@ -1,6 +1,8 @@
 package main
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestParseDurationSec(t *testing.T) {
 	cases := []struct {
@@ -91,6 +93,73 @@ func TestOverallHealth(t *testing.T) {
 			got := overallHealth(tc.checks)
 			if got != tc.want {
 				t.Errorf("overallHealth(%v) = %q, want %q", tc.checks, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalFilePath(t *testing.T) {
+	const base = "/home/yolan/files/Webradio"
+	cases := []struct {
+		name string
+		in   string
+		base string
+		want string
+	}{
+		{
+			name: "real gaende-favorites track",
+			in:   "00_❤️ Tracks/01 - Cafius - Vertigo (Original Mix).mp3",
+			base: base,
+			want: "/home/yolan/files/Webradio/❤️ Tracks/01 - Cafius - Vertigo (Original Mix).mp3",
+		},
+		{
+			name: "bermuda stage with spaces in playlist name",
+			in:   "00_BERMUDA - AFTER 6/04 Sweet Dreams (Avicii Sweeder Dreams Mix).mp3",
+			base: base,
+			want: "/home/yolan/files/Webradio/BERMUDA - AFTER 6/04 Sweet Dreams (Avicii Sweeder Dreams Mix).mp3",
+		},
+		{
+			name: "nested subfolder preserved",
+			in:   "00_AMBIANCE/CD 1/01 - Erly Tepshi - Pluvia.mp3",
+			base: base,
+			want: "/home/yolan/files/Webradio/AMBIANCE/CD 1/01 - Erly Tepshi - Pluvia.mp3",
+		},
+		{
+			name: "no NN_ prefix — playlist has none, leave alone",
+			in:   "some-folder/track.mp3",
+			base: base,
+			want: "/home/yolan/files/Webradio/some-folder/track.mp3",
+		},
+		{
+			name: "empty musicBasePath — return raw (safe fallback)",
+			in:   "00_❤️ Tracks/01 - Cafius - Vertigo.mp3",
+			base: "",
+			want: "00_❤️ Tracks/01 - Cafius - Vertigo.mp3",
+		},
+		{
+			name: "empty input — return empty",
+			in:   "",
+			base: base,
+			want: "",
+		},
+		{
+			name: "no slash at all — return raw",
+			in:   "weird.mp3",
+			base: base,
+			want: "weird.mp3",
+		},
+		{
+			name: "numeric prefix without underscore should NOT be stripped",
+			in:   "99abc/file.mp3",
+			base: base,
+			want: "/home/yolan/files/Webradio/99abc/file.mp3",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := canonicalFilePath(tc.in, tc.base)
+			if got != tc.want {
+				t.Errorf("canonicalFilePath(%q, %q) = %q, want %q", tc.in, tc.base, got, tc.want)
 			}
 		})
 	}

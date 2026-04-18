@@ -72,9 +72,10 @@ sleep 1
 nohup env \
   DATABASE_URL="postgres://gaende:${POSTGRES_PASSWORD:-gaende_dev}@127.0.0.1:15432/gaende?sslmode=disable" \
   MPD_HOST=127.0.0.1 \
+  MUSIC_BASE_PATH=/home/yolan/files/Webradio \
   PLEX_URL="http://127.0.0.1:31711" \
   PLEX_TOKEN="${PLEX_TOKEN}" \
-  LASTFM_KEY="${LASTFM_KEY}" \
+  LASTFM_API_KEY="${LASTFM_API_KEY}" \
   ADMIN_TOKEN="${ADMIN_TOKEN}" \
   ./bridge > bridge.log 2>&1 &
 

@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -54,11 +56,12 @@ func main() {
 
 			// Start play logger worker — uses its own context so shutdown drain works
 			playCtx, playCancel := context.WithCancel(context.Background())
+			musicBase := cfg.MusicBasePath
 			playWg.Add(1)
 			go func() {
 				defer playWg.Done()
 				for np := range playCh {
-					logPlay(playCtx, database, np)
+					logPlay(playCtx, database, np, musicBase)
 				}
 			}()
 			defer playCancel()
@@ -318,11 +321,12 @@ func main() {
 	slog.Info("bridge stopped")
 }
 
-func logPlay(ctx context.Context, database *db.DB, np mpdpool.NowPlaying) {
+func logPlay(ctx context.Context, database *db.DB, np mpdpool.NowPlaying, musicBasePath string) {
+	filePath := canonicalFilePath(np.Song["file"], musicBasePath)
 	_, err := database.Pool.Exec(ctx, `
 		INSERT INTO track_plays (stage_id, artist, title, album, file_path, duration_sec, played_at)
 		VALUES ($1, $2, $3, $4, $5, $6, now())
-	`, np.StageID, np.Song["Artist"], np.Song["Title"], np.Song["Album"], np.Song["file"], parseDurationSec(np.Duration))
+	`, np.StageID, np.Song["Artist"], np.Song["Title"], np.Song["Album"], filePath, parseDurationSec(np.Duration))
 	if err != nil {
 		slog.Warn("failed to log play", "stage", np.StageID, "error", err)
 	}
@@ -337,6 +341,39 @@ func parseDurationSec(s string) any {
 		return nil
 	}
 	return int(d)
+}
+
+// canonicalFilePath turns MPD's relative file (e.g. "00_❤️ Tracks/01 - Cafius - Vertigo.mp3")
+// into the Webradio-level path ("{musicBasePath}/❤️ Tracks/01 - Cafius - Vertigo.mp3") so
+// track_plays.file_path and a future library_tracks importer can join on the same key.
+//
+// MPD's music_directory contains symlinks named "NN_<PlaylistName>" pointing at
+// ~/files/Webradio/<PlaylistName>/. We strip that NN_ prefix and re-root under
+// musicBasePath. If musicBasePath is empty (config not set), return mpdFile unchanged —
+// the join won't work but logs keep flowing.
+func canonicalFilePath(mpdFile, musicBasePath string) string {
+	if mpdFile == "" || musicBasePath == "" {
+		return mpdFile
+	}
+	i := strings.IndexByte(mpdFile, '/')
+	if i < 0 {
+		return mpdFile
+	}
+	prefix, rest := mpdFile[:i], mpdFile[i+1:]
+	playlist := stripNNPrefix(prefix)
+	return path.Join(musicBasePath, playlist, rest)
+}
+
+// stripNNPrefix removes a leading "NN_" (two digits + underscore) if present.
+// Works on the first path component only.
+func stripNNPrefix(s string) string {
+	if len(s) < 4 || s[2] != '_' {
+		return s
+	}
+	if s[0] < '0' || s[0] > '9' || s[1] < '0' || s[1] > '9' {
+		return s
+	}
+	return s[3:]
 }
 
 // overallHealth collapses the per-check map into a single verdict.
