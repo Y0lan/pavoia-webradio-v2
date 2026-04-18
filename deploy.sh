@@ -188,6 +188,27 @@ WEB_SERVER="\$HOME/gaende-radio/web/standalone/server.js"
 pkill -TERM -f -- "\$WEB_SERVER" 2>/dev/null || true
 sleep 2
 pkill -KILL -f -- "\$WEB_SERVER" 2>/dev/null || true
+
+# Belt-and-suspenders: when Next.js runs from standalone, the cmdline shows
+# server.js so our path-based pkill above catches it. But after it has been
+# running a while, /proc/PID/cmdline can show as "next-server (v16.2.1)"
+# instead — a dev-only flourish Next applies via process.title. The path
+# pattern doesn't match that, which leaves a stale server holding :13000
+# and the new deploy silently fails with EADDRINUSE. We scope the fallback
+# to processes listening on OUR web port so we can't accidentally reap an
+# unrelated Next app on this account.
+if command -v ss >/dev/null 2>&1; then
+    STALE_PID=\$(ss -tlnp 2>/dev/null | awk -v port=":${WEB_PORT}" '\$4 ~ port { print \$0 }' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+    if [ -n "\$STALE_PID" ]; then
+        TITLE=\$(ps -p "\$STALE_PID" -o comm= 2>/dev/null || true)
+        if [ -n "\$TITLE" ] && [ "\$TITLE" != "node" ]; then
+            echo "  killing stale web on :${WEB_PORT} (PID \$STALE_PID, title '\$TITLE')"
+            kill -TERM "\$STALE_PID" 2>/dev/null || true
+            sleep 2
+            kill -KILL "\$STALE_PID" 2>/dev/null || true
+        fi
+    fi
+fi
 PORT="${WEB_PORT}" HOSTNAME=0.0.0.0 nohup "\$MISE_NODE" "\$WEB_SERVER" > ~/gaende-radio/web.log 2>&1 &
 echo "  Web PID: \$!"
 REMOTE
