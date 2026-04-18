@@ -21,6 +21,7 @@ import (
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/api"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/config"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/db"
+	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/disk"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/enrichment"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/hub"
 	mpdpool "github.com/Y0lan/pavoia-webradio-v2/apps/bridge/mpd"
@@ -108,24 +109,29 @@ func main() {
 	slog.Info("mpd pool ready", "connected", connected, "total", len(cfg.VisibleStages()))
 	pool.StartWatchers(ctx, cfg.MPDHost)
 
-	// Plex sync worker
+	// Disk importer — the authoritative library-metadata ingest path as of Phase D.
+	// Reads JSON artifacts (sync_manifest.json + artists/playlists/albums/tracks_index
+	// + per-track sidecars) that scripts/plex-sync/ writes atomically to MUSIC_BASE_PATH,
+	// verifies sha256 against the manifest, upserts library_tracks + track_stages +
+	// artists, and soft-deletes rows that are no longer on disk.
+	//
+	// Replaces the direct Plex API client role — the bridge no longer authenticates
+	// against Plex. The plex package is kept compiled (for Phase E to cleanly remove)
+	// but its SyncWorker is no longer wired. Plex-health probing stays available for
+	// the /health endpoint's reachability signal.
 	var plexClient *plex.Client
-	if cfg.PlexToken != "" && cfg.PlexURL != "" {
+	if cfg.PlexURL != "" && cfg.PlexToken != "" {
 		plexClient = plex.NewClient(cfg.PlexURL, cfg.PlexToken)
-		if plexClient.Healthy() {
-			slog.Info("plex connected", "url", cfg.PlexURL)
+		// Plex reachability is advisory only: /health surfaces it, but nothing in
+		// the bridge depends on Plex being up. Scheduled for removal in Phase E.
+	}
 
-			if database != nil {
-				mappings := buildPlexMappings(cfg)
-				syncWorker := plex.NewSyncWorker(plexClient, database.Pool, mappings, 5*time.Minute)
-				syncWorker.Start(ctx)
-				slog.Info("plex sync worker started", "interval", "5m", "playlists", len(mappings))
-			}
-		} else {
-			slog.Warn("plex not reachable", "url", cfg.PlexURL)
-		}
+	if database != nil && cfg.MusicBasePath != "" {
+		importer := disk.NewImporter(database.Pool, cfg, cfg.MusicBasePath)
+		importer.Start(ctx, 2*time.Minute)
+		slog.Info("disk importer started", "webradio", cfg.MusicBasePath, "interval", "2m")
 	} else {
-		slog.Info("plex not configured — skipping sync")
+		slog.Info("disk importer not configured — skipping (need DATABASE_URL + MUSIC_BASE_PATH)")
 	}
 
 	// Artist enrichment worker (Last.fm + MusicBrainz)
@@ -426,17 +432,6 @@ func mpdHealthStatus(pool *mpdpool.Pool, stages []config.StageConfig) string {
 		return fmt.Sprintf("partial (%d/%d)", aliveCount, len(stages))
 	}
 	return "down"
-}
-
-func buildPlexMappings(cfg *config.Config) []plex.StageMapping {
-	var mappings []plex.StageMapping
-	for _, s := range cfg.VisibleStages() {
-		mappings = append(mappings, plex.StageMapping{
-			PlaylistName: s.ID,
-			StageID:      s.ID,
-		})
-	}
-	return mappings
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
