@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -161,19 +162,25 @@ func main() {
 			}
 		}
 
+		checks := map[string]string{
+			"mpd":         mpdStatus,
+			"postgres":    dbStatus,
+			"redis":       "not_connected",
+			"meilisearch": "not_connected",
+			"plex":        plexStatus,
+		}
+		overall := overallHealth(checks)
+
 		health := map[string]any{
-			"status": "ok",
+			"status": overall,
 			"time":   time.Now().UTC().Format(time.RFC3339),
 			"stages": len(visibleStages),
-			"checks": map[string]string{
-				"mpd":         mpdStatus,
-				"postgres":    dbStatus,
-				"redis":       "not_connected",
-				"meilisearch": "not_connected",
-				"plex":        plexStatus,
-			},
+			"checks": checks,
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if overall != "ok" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
 		if err := json.NewEncoder(w).Encode(health); err != nil {
 			slog.Debug("health response write failed", "error", err)
 		}
@@ -313,12 +320,49 @@ func main() {
 
 func logPlay(ctx context.Context, database *db.DB, np mpdpool.NowPlaying) {
 	_, err := database.Pool.Exec(ctx, `
-		INSERT INTO track_plays (stage_id, artist, title, album, file_path, played_at)
-		VALUES ($1, $2, $3, $4, $5, now())
-	`, np.StageID, np.Song["Artist"], np.Song["Title"], np.Song["Album"], np.Song["file"])
+		INSERT INTO track_plays (stage_id, artist, title, album, file_path, duration_sec, played_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now())
+	`, np.StageID, np.Song["Artist"], np.Song["Title"], np.Song["Album"], np.Song["file"], parseDurationSec(np.Duration))
 	if err != nil {
 		slog.Warn("failed to log play", "stage", np.StageID, "error", err)
 	}
+}
+
+// parseDurationSec converts MPD's status["duration"] (fractional seconds as a string)
+// into the nullable integer stored in track_plays.duration_sec. Returns nil on anything
+// unparseable or non-positive so Postgres stores NULL, not a fake zero.
+func parseDurationSec(s string) any {
+	d, err := strconv.ParseFloat(s, 64)
+	if err != nil || d < 1 {
+		return nil
+	}
+	return int(d)
+}
+
+// overallHealth collapses the per-check map into a single verdict.
+//   - "down"     if any CRITICAL check is "down" (postgres, or mpd entirely down).
+//   - "degraded" if any check is non-ok (partial MPD, plex down, etc.) but nothing critical failed.
+//   - "ok"       only when every check reports "ok", "not_connected", or "not_configured".
+//
+// Non-critical checks: redis + meilisearch (never used today), plex (advisory — Python cron
+// is the real ingest path).
+func overallHealth(checks map[string]string) string {
+	critical := map[string]bool{"postgres": true, "mpd": true}
+
+	degraded := false
+	for name, status := range checks {
+		if status == "ok" || status == "not_connected" || status == "not_configured" {
+			continue
+		}
+		if critical[name] && status == "down" {
+			return "down"
+		}
+		degraded = true
+	}
+	if degraded {
+		return "degraded"
+	}
+	return "ok"
 }
 
 func mpdHealthStatus(pool *mpdpool.Pool, stages []config.StageConfig) string {
