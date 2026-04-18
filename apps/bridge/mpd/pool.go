@@ -35,6 +35,17 @@ const defaultCmdTimeout = 5 * time.Second
 // 10 min is comfortably above any realistic track length; false positives only cost a reconnect.
 const watcherIdleTimeout = 10 * time.Minute
 
+// keepaliveInterval — how often the keepalive goroutine pings the main client.
+//
+// Must be strictly less than MPD's server-side `connection_timeout` (default 60s).
+// Without this, on stages with long tracks (> 60s), the main client goes idle, MPD
+// closes it, and the next nowPlaying() gets EOF and markDead silently — but
+// drainWatcher keeps getting watcher events so the outer reconnect loop never fires.
+// Result: /api/stages stays stuck on "offline" for all 9 stages indefinitely.
+//
+// 30s gives two attempts per MPD idle cycle — cheap insurance.
+const keepaliveInterval = 30 * time.Second
+
 // Conn wraps a single MPD connection for one stage.
 //
 // Concurrency model:
@@ -164,18 +175,60 @@ func (p *Pool) AllNowPlaying() []NowPlaying {
 	return result
 }
 
-// StartWatchers launches a goroutine per stage that watches for track changes.
+// StartWatchers launches a goroutine per stage that watches for track changes,
+// plus a keepalive goroutine per stage that pings the main client so MPD's
+// server-side idle timeout doesn't silently kill it between watcher events.
 // Pass the parent context for graceful shutdown.
 func (p *Pool) StartWatchers(ctx context.Context, host string) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 
 	for _, c := range p.conns {
-		p.wg.Add(1)
+		p.wg.Add(2)
 		go func(conn *Conn) {
 			defer p.wg.Done()
 			p.watchLoop(watchCtx, conn, host)
 		}(c)
+		go func(conn *Conn) {
+			defer p.wg.Done()
+			p.keepaliveLoop(watchCtx, conn)
+		}(c)
+	}
+}
+
+// keepaliveLoop pings the main MPD client every keepaliveInterval to prevent
+// MPD's server-side connection_timeout from silently closing the socket.
+//
+// A closed socket cascades: the next nowPlaying() call sees EOF → markDead →
+// /api/stages returns "offline" → /api/stages stays "offline" for this stage
+// indefinitely because watchLoop's reconnect check is gated behind drainWatcher
+// returning, which only happens on watcher socket failure or the 10-minute
+// watchdog. Active stages with track changes < 10min keep resetting the
+// watchdog, so the stage stays wedged as "offline" forever.
+//
+// On ping failure we markDead the EXACT client we pinged (CAS in markDead
+// means we don't kill a fresh client a reconnect just swapped in).
+func (p *Pool) keepaliveLoop(ctx context.Context, conn *Conn) {
+	ticker := time.NewTicker(keepaliveInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			var pinged *gompd.Client
+			ok, err := conn.withClient(func(client *gompd.Client) error {
+				pinged = client
+				return client.Ping()
+			})
+			if ok && err != nil {
+				slog.Warn("mpd keepalive ping failed", "stage", conn.Stage.ID, "error", err)
+				conn.markDead(pinged)
+			}
+			// ok=false means the conn was already dead — nothing to do; watchLoop
+			// reconnect path (or drainWatcher reconnect-on-event below) will heal.
+		}
 	}
 }
 
@@ -357,7 +410,9 @@ func (c *Conn) nowPlaying() NowPlaying {
 	np := NowPlaying{StageID: c.Stage.ID}
 
 	var status map[string]string
+	var statusClient *gompd.Client
 	ok, err := c.withClient(func(client *gompd.Client) error {
+		statusClient = client
 		var e error
 		status, e = client.Status()
 		return e
@@ -368,13 +423,12 @@ func (c *Conn) nowPlaying() NowPlaying {
 		return np
 	}
 	if err != nil {
-		// Probe with Ping; a transient error doesn't warrant killing the connection.
+		// Probe with Ping on the SAME client we just failed on — if it errors too,
+		// this client is genuinely dead. markDead's CAS means we'll only kill that
+		// exact client, not a fresh one a concurrent reconnect just swapped in.
 		_, pingErr := c.withClient(func(client *gompd.Client) error { return client.Ping() })
 		if pingErr != nil {
-			c.mu.Lock()
-			client := c.client
-			c.mu.Unlock()
-			c.markDead(client)
+			c.markDead(statusClient)
 		}
 		np.Status = "error"
 		np.Error = err.Error()
@@ -450,7 +504,7 @@ func (p *Pool) watchLoop(ctx context.Context, conn *Conn, host string) {
 			}
 		}
 
-		p.drainWatcher(ctx, watcher, conn, &lastSong)
+		p.drainWatcher(ctx, watcher, conn, addr, &lastSong)
 		_ = watcher.Close()
 	}
 }
@@ -464,7 +518,7 @@ func (p *Pool) watchLoop(ctx context.Context, conn *Conn, host string) {
 //
 // Uses a single shared timer rather than `time.After` per select iteration so
 // expired timers don't pile up on high-traffic stages.
-func (p *Pool) drainWatcher(ctx context.Context, watcher *gompd.Watcher, conn *Conn, lastSong *string) {
+func (p *Pool) drainWatcher(ctx context.Context, watcher *gompd.Watcher, conn *Conn, addr string, lastSong *string) {
 	timer := time.NewTimer(watcherIdleTimeout)
 	defer timer.Stop()
 
@@ -502,6 +556,28 @@ func (p *Pool) drainWatcher(ctx context.Context, watcher *gompd.Watcher, conn *C
 			// mid-reconnect) — is a liveness signal. The watcher's separate
 			// socket is clearly functioning.
 			conn.lastEventAtNanos.Store(time.Now().UnixNano())
+
+			// Self-heal: if something marked the main client dead while we were
+			// blocked on watcher.Event (e.g. HTTP /api/stages got EOF, or the
+			// keepalive saw a broken pipe), reconnect it right here before the
+			// nowPlaying fetch. Without this, the main client stays dead until
+			// the 10-min watchdog fires — but watcher events keep resetting that
+			// watchdog forever on active stages, so the stage wedges on
+			// "offline" indefinitely.
+			conn.mu.Lock()
+			alive := conn.alive
+			conn.mu.Unlock()
+			if !alive {
+				if err := conn.connect(addr); err != nil {
+					slog.Warn("mpd main client reconnect on watcher event failed",
+						"stage", conn.Stage.ID, "error", err)
+					// Fall through — nowPlaying will return "offline" for this emit;
+					// next watcher event or the keepalive will try again.
+				} else {
+					slog.Info("mpd main client reconnected on watcher event", "stage", conn.Stage.ID)
+				}
+			}
+
 			np := conn.nowPlaying()
 			songKey := np.Song["file"]
 			if songKey != *lastSong && songKey != "" {

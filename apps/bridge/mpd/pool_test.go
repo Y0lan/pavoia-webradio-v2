@@ -1,6 +1,7 @@
 package mpd
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -272,5 +273,92 @@ func TestEventFreshnessWindowBelowWatchdog(t *testing.T) {
 				"watcher is already being killed by the watchdog",
 			eventFreshnessWindow, watcherIdleTimeout,
 		)
+	}
+}
+
+// TestKeepaliveIntervalBelowMPDDefault locks in the Bug-2 fix invariant:
+// the bridge's keepalive must tick more often than MPD's server-side
+// connection_timeout (default 60s). If we drift to >= 60s the idle timeout
+// can fire between pings, MPD closes the main client, and we're back to the
+// original "alive:false for every stage" cascade (/api/stages wedges because
+// drainWatcher's event loop keeps resetting the 10-min watchdog forever).
+//
+// Regression: 2026-04-19 — see pool.go keepaliveInterval comment + codex
+// challenge log in git history.
+func TestKeepaliveIntervalBelowMPDDefault(t *testing.T) {
+	const mpdDefaultConnectionTimeout = 60 * time.Second
+	if keepaliveInterval >= mpdDefaultConnectionTimeout {
+		t.Fatalf(
+			"keepaliveInterval (%v) must be < MPD's default connection_timeout (%v); "+
+				"otherwise the main client can be idle-closed between pings and the "+
+				"bridge will fail to self-heal",
+			keepaliveInterval, mpdDefaultConnectionTimeout,
+		)
+	}
+}
+
+// TestMarkDeadCASProtectsFreshClient — the race fix for Bug 2. When
+// nowPlaying's Status() returns EOF, we markDead the EXACT client that
+// failed, not a fresh one that a concurrent reconnect just swapped in.
+//
+// Setup: install fake client A, fail Status on it, concurrently swap to
+// client B (simulating reconnect). markDead(A) must leave B alone.
+func TestMarkDeadCASProtectsFreshClient(t *testing.T) {
+	c := &Conn{Stage: config.StageConfig{ID: "s"}}
+
+	// Use a non-nil sentinel pointer we can compare against. markDead only
+	// touches c.client if expected matches — the client doesn't need to be a
+	// real gompd.Client because markDead's Close() path is fire-and-forget.
+	clientA := &gompd.Client{}
+	clientB := &gompd.Client{}
+
+	c.mu.Lock()
+	c.client = clientA
+	c.alive = true
+	c.mu.Unlock()
+
+	// Simulate a reconnect: main client swapped A → B while our caller was
+	// mid-failure on A.
+	c.mu.Lock()
+	c.client = clientB
+	c.alive = true
+	c.mu.Unlock()
+
+	// The caller still has a reference to the stale A and calls markDead(A).
+	// CAS must refuse to nil out B.
+	c.markDead(clientA)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.client != clientB {
+		t.Fatal("markDead(stale) must not swap out the current fresh client")
+	}
+	if !c.alive {
+		t.Fatal("markDead(stale) must not flip alive for a fresh client")
+	}
+}
+
+// TestKeepaliveLoopShutsDown — the keepalive goroutine exits promptly when
+// context is cancelled; no leaks, no panics even when the conn has never
+// been connected.
+func TestKeepaliveLoopShutsDown(t *testing.T) {
+	stages := []config.StageConfig{{ID: "s", MPDPort: 6600}}
+	pool := NewPool(stages, nil)
+	conn := pool.conns["s"]
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pool.keepaliveLoop(ctx, conn)
+	}()
+
+	// Loop is running with a 30s ticker. Cancel and verify it exits quickly.
+	cancel()
+	select {
+	case <-done:
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("keepaliveLoop did not exit within 2s of ctx cancel")
 	}
 }
