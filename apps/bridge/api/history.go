@@ -72,7 +72,10 @@ func (h *HistoryHandlers) HandleHistory(w http.ResponseWriter, r *http.Request) 
 	}
 	if genre := q.Get("genre"); genre != "" {
 		// Join with library_tracks for genre filter
-		where += " AND file_path IN (SELECT file_path FROM library_tracks WHERE deleted_at IS NULL AND genre = " + nextArg() + ")"
+		// No deleted_at filter: a past play of a now-deleted track still had a
+		// genre, and the user asking "plays of techno tracks" wants to see
+		// historical techno plays even if those tracks were later removed.
+		where += " AND file_path IN (SELECT file_path FROM library_tracks WHERE genre = " + nextArg() + ")"
 		args = append(args, genre)
 	}
 	if search := q.Get("search"); search != "" {

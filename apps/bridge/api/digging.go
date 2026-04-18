@@ -53,7 +53,10 @@ func (h *DiggingHandlers) HandleDiggingCalendar(w http.ResponseWriter, r *http.R
 			SELECT DATE(lt.added_at)::text, ts.stage_id, COUNT(*)
 			FROM library_tracks lt
 			JOIN track_stages ts ON ts.file_path = lt.file_path
-			WHERE lt.deleted_at IS NULL AND EXTRACT(YEAR FROM lt.added_at) = $1
+			-- /digging is a historical log of when tracks entered the library.
+			-- Tracks removed later stay counted here; filtering by deleted_at
+			-- would rewrite history whenever a playlist is pruned.
+			WHERE EXTRACT(YEAR FROM lt.added_at) = $1
 			GROUP BY DATE(lt.added_at), ts.stage_id
 			ORDER BY DATE(lt.added_at)
 		`
@@ -61,7 +64,8 @@ func (h *DiggingHandlers) HandleDiggingCalendar(w http.ResponseWriter, r *http.R
 		query = `
 			SELECT DATE(added_at)::text, COUNT(*)
 			FROM library_tracks
-			WHERE deleted_at IS NULL AND EXTRACT(YEAR FROM added_at) = $1
+			-- Retrospective: counts include later-deleted tracks on purpose.
+			WHERE EXTRACT(YEAR FROM added_at) = $1
 			GROUP BY DATE(added_at)
 			ORDER BY DATE(added_at)
 		`
@@ -174,7 +178,8 @@ func (h *DiggingHandlers) HandleDiggingStreaks(w http.ResponseWriter, r *http.Re
 	rows, err := h.DB.Query(r.Context(), `
 		SELECT DISTINCT DATE(added_at)::text
 		FROM library_tracks
-		WHERE deleted_at IS NULL
+		-- Streaks are a retrospective metric; deleted tracks still count as
+		-- "you dug that day" because you did dig that day.
 		ORDER BY 1
 	`)
 	if err != nil {
@@ -205,7 +210,6 @@ func (h *DiggingHandlers) HandleDiggingStreaks(w http.ResponseWriter, r *http.Re
 	countRows, err := h.DB.Query(r.Context(), `
 		SELECT DATE(added_at)::text, COUNT(*)
 		FROM library_tracks
-		WHERE deleted_at IS NULL
 		GROUP BY DATE(added_at)
 		ORDER BY DATE(added_at)
 	`)
@@ -242,7 +246,6 @@ func (h *DiggingHandlers) HandleDiggingPatterns(w http.ResponseWriter, r *http.R
 	dowRows, err := h.DB.Query(r.Context(), `
 		SELECT EXTRACT(DOW FROM added_at)::int, COUNT(*)
 		FROM library_tracks
-		WHERE deleted_at IS NULL
 		GROUP BY 1 ORDER BY 1
 	`)
 	if err != nil {
@@ -268,7 +271,6 @@ func (h *DiggingHandlers) HandleDiggingPatterns(w http.ResponseWriter, r *http.R
 	hourRows, err := h.DB.Query(r.Context(), `
 		SELECT EXTRACT(HOUR FROM added_at)::int, COUNT(*)
 		FROM library_tracks
-		WHERE deleted_at IS NULL
 		GROUP BY 1 ORDER BY 1
 	`)
 	if err != nil {
