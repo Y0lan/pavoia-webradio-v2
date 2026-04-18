@@ -5,7 +5,38 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+func TestPgBackupStatusFrom(t *testing.T) {
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	ok := func(h int) *time.Time { t := now.Add(time.Duration(-h) * time.Hour); return &t }
+
+	cases := []struct {
+		name           string
+		lastOK, lastFailed *time.Time
+		want           string
+	}{
+		{"never_ran: both nil", nil, nil, "never_ran"},
+		{"ok: fresh ok (1h old)", ok(1), nil, "ok"},
+		{"ok: fresh ok even with older failure", ok(1), ok(5), "ok"},
+		{"ok: exactly at stale boundary", ok(30), nil, "ok"}, // 30h == boundary
+		{"stale: ok past window, no recent failure", ok(31), nil, "stale"},
+		{"failing: failure newer than ok AND within window", ok(31), ok(10), "failing"},
+		{"stale: failure older than ok", ok(5), ok(20), "ok"}, // fresh ok wins
+		{"stale: only failures, all aged out", nil, ok(50), "stale"},
+		{"failing: only a recent failure, no oks", nil, ok(5), "failing"},
+		{"stale: ok exists but stale AND failure also stale", ok(40), ok(50), "stale"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pgBackupStatusFrom(tc.lastOK, tc.lastFailed, now)
+			if got != tc.want {
+				t.Errorf("pgBackupStatusFrom(%v, %v) = %q, want %q", tc.lastOK, tc.lastFailed, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseDurationSec(t *testing.T) {
 	cases := []struct {
@@ -126,6 +157,15 @@ func TestOverallHealth(t *testing.T) {
 				"mpd": "ok", "postgres": "ok", "plex": "not_used",
 				"redis": "not_connected", "meilisearch": "not_connected",
 				"disk_sync": "ok", "pg_backup": "failing",
+			},
+			want: "degraded",
+		},
+		{
+			name: "pg_backup probe_error -> degraded (monitoring itself broke)",
+			checks: map[string]string{
+				"mpd": "ok", "postgres": "ok", "plex": "not_used",
+				"redis": "not_connected", "meilisearch": "not_connected",
+				"disk_sync": "ok", "pg_backup": "probe_error",
 			},
 			want: "degraded",
 		},

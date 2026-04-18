@@ -155,6 +155,14 @@ def write_sync_manifest(artifact_paths, generation_id, counts):
 
     Downstream readers verify `artifacts[name].sha256` before trusting a generation.
     A mismatch (or missing manifest) means a partial write — reject the batch.
+
+    Sidecars (per-track .mp3.json + .flac.json files) are covered by an
+    aggregate hash: we walk the whole Webradio tree, hash each sidecar, and
+    hash the sorted (path, file-hash) tuples into one `aggregate_sha256`.
+    If ANY sidecar changes (add, remove, mutate) between sync runs, the
+    aggregate changes — lets the Go importer detect filesystem drift that
+    the four top-level artifacts wouldn't catch. Cost ~1-2 seconds per run
+    on 7000 sidecars at ~1KB each.
     """
     artifacts = {}
     for name, path in artifact_paths.items():
@@ -166,15 +174,29 @@ def write_sync_manifest(artifact_paths, generation_id, counts):
             "size_bytes": os.path.getsize(path),
             "mtime": _utc_ts_str(os.path.getmtime(path)),
         }
+
+    sidecar_count, sidecar_aggregate = _sidecar_aggregate_sha256(WEBRADIO_FOLDER)
+
     manifest = {
         "generation_id": generation_id,
         "written_at": _utc_now_str(),
         "counts": counts,
         "artifacts": artifacts,
+        "sidecars": {
+            "count": sidecar_count,
+            "aggregate_sha256": sidecar_aggregate,
+        },
     }
     atomic_write_json(
         os.path.join(WEBRADIO_FOLDER, 'sync_manifest.json'), manifest,
     )
+
+
+# _sidecar_aggregate_sha256 moved to sidecar_hash.py so the Go cross-language
+# test can import the exact function we run in production. This alias keeps
+# in-file callers (write_sync_manifest below) untouched while the canonical
+# implementation lives in the importable module.
+from sidecar_hash import sidecar_aggregate_sha256 as _sidecar_aggregate_sha256  # noqa: E402
 
 # Playlists to ignore (using contains matching)
 IGNORE_PLAYLISTS = [

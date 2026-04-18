@@ -245,6 +245,60 @@ func main() {
 		}))
 	}
 
+	// Admin: verify manifest sidecar aggregate.
+	//
+	// Expensive — walks + hashes every *.mp3.json/.flac.json (~7000 files,
+	// ~2s wall-clock on Whatbox). Not called from the hot importer tick,
+	// hence wired to an admin endpoint so ops can manually spot-check for
+	// filesystem drift between Python-written manifests and actual disk state.
+	//
+	// Response codes:
+	//   200 status=verified            — hashes match
+	//   409 status=drift               — count or aggregate mismatch
+	//   422 status=manifest_too_old    — manifest predates sidecars field
+	//   500 status=probe_error         — load manifest failed / walk errored
+	if diskImporter != nil {
+		mux.HandleFunc("POST /api/admin/verify-sidecars", api.AdminAuth(cfg.AdminToken, func(w http.ResponseWriter, r *http.Request) {
+			manifest, err := disk.LoadManifest(cfg.MusicBasePath)
+			if err != nil {
+				api.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+					"status": "probe_error",
+					"error":  fmt.Sprintf("load manifest: %v", err),
+				})
+				return
+			}
+			if vErr := disk.VerifySidecars(cfg.MusicBasePath, manifest); vErr != nil {
+				switch {
+				case errors.Is(vErr, disk.ErrSidecarsFieldMissing):
+					api.WriteJSON(w, http.StatusUnprocessableEntity, map[string]any{
+						"status":        "manifest_too_old",
+						"generation_id": manifest.GenerationID,
+						"error":         vErr.Error(),
+					})
+				case errors.Is(vErr, disk.ErrSidecarDrift):
+					api.WriteJSON(w, http.StatusConflict, map[string]any{
+						"status":        "drift",
+						"generation_id": manifest.GenerationID,
+						"error":         vErr.Error(),
+					})
+				default:
+					// Walk / IO / anything else — genuine probe failure.
+					api.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+						"status":        "probe_error",
+						"generation_id": manifest.GenerationID,
+						"error":         vErr.Error(),
+					})
+				}
+				return
+			}
+			api.WriteJSON(w, http.StatusOK, map[string]any{
+				"status":        "verified",
+				"generation_id": manifest.GenerationID,
+				"count":         manifest.Sidecars.Count,
+			})
+		}))
+	}
+
 	// WebSocket endpoint — per-stage now-playing broadcasts
 	mux.HandleFunc("GET /ws", wsHub.HandleWS)
 
@@ -450,10 +504,13 @@ func writeHealthResponse(w http.ResponseWriter, checks map[string]string, stageC
 // hide three consecutive failed nights until the 30h window expired.
 //
 //   - "not_configured" if the database isn't connected
-//   - "never_ran"      table exists but has no ok rows yet
-//   - "failing"        the most recent row overall is status='failed' AND was
-//                      written within pgBackupFailureWindow — the cron tried
-//                      and failed recently, surface immediately
+//   - "probe_error"    the DB query itself failed — surface separately from
+//                      never_ran so ops sees "monitoring is broken" distinct
+//                      from "monitoring says nothing ran"
+//   - "never_ran"      table exists but has no rows yet
+//   - "failing"        the most recent failed row is AFTER the most recent ok
+//                      AND within pgBackupFailureWindow — cron tried and
+//                      failed recently, surface immediately
 //   - "stale"          last ok row older than pgBackupStaleAfter — watchdog
 //                      should alert (backups silently stopped)
 //   - "ok"             latest row is 'ok' and within the stale window
@@ -488,25 +545,40 @@ func pgBackupStatus(ctx context.Context, database *db.DB) string {
 			(SELECT MAX(written_at) FROM pg_backup_log WHERE status = 'failed')
 	`).Scan(&lastOKAt, &lastFailedAt)
 	if err != nil {
-		return "never_ran"
+		slog.Warn("pg_backup probe failed", "error", err)
+		return "probe_error"
 	}
+	return pgBackupStatusFrom(lastOKAt, lastFailedAt, time.Now())
+}
+
+// pgBackupStatusFrom is the pure-function decision table extracted from
+// pgBackupStatus so unit tests can exercise every branch without a live DB.
+// `now` is passed explicitly so tests can simulate arbitrary timelines.
+//
+//   - never_ran: both nil (table empty)
+//   - ok:        lastOKAt within pgBackupStaleAfter of now
+//   - failing:   lastFailedAt AFTER lastOKAt AND within pgBackupFailureWindow
+//   - stale:     any row exists but nothing is fresh (silent-stopped backups
+//                OR only-failures that have aged past the failure window)
+func pgBackupStatusFrom(lastOKAt, lastFailedAt *time.Time, now time.Time) string {
 	if lastOKAt == nil && lastFailedAt == nil {
 		return "never_ran"
 	}
 
-	// 1. Recent successful backup dominates.
-	if lastOKAt != nil && time.Since(*lastOKAt) <= pgBackupStaleAfter {
+	// 1. Recent successful backup dominates — a manual-admin failure after a
+	//    clean nightly run should not poison /health.
+	if lastOKAt != nil && now.Sub(*lastOKAt) <= pgBackupStaleAfter {
 		return "ok"
 	}
 
-	// 2. Recent failure that's NEWER than the last ok (if any).
+	// 2. Recent failure that's strictly NEWER than the last ok (if any).
 	if lastFailedAt != nil &&
-		time.Since(*lastFailedAt) <= pgBackupFailureWindow &&
+		now.Sub(*lastFailedAt) <= pgBackupFailureWindow &&
 		(lastOKAt == nil || lastFailedAt.After(*lastOKAt)) {
 		return "failing"
 	}
 
-	// 3. Any row exists but nothing is fresh — silent stop.
+	// 3. Any row exists but nothing is fresh — backups silently stopped.
 	return "stale"
 }
 
