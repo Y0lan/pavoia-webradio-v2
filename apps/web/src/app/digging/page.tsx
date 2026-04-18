@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BRIDGE_URL } from "@/lib/stages";
 
 function cellColor(count: number): string {
@@ -17,15 +17,30 @@ const DAYS = ["", "Mon", "", "Wed", "", "Fri", ""];
 
 export default function DiggingPage() {
   const [year, setYear] = useState(new Date().getFullYear());
-
-  const { data: calendar } = useQuery({
-    queryKey: ["digging-calendar", year],
-    queryFn: () => fetch(`${BRIDGE_URL}/api/digging/calendar?year=${year}`).then((r) => r.json()),
-  });
+  const [userSelectedYear, setUserSelectedYear] = useState(false);
 
   const { data: streaks } = useQuery({
     queryKey: ["digging-streaks"],
     queryFn: () => fetch(`${BRIDGE_URL}/api/digging/streaks`).then((r) => r.json()),
+  });
+
+  // If the user hasn't picked a year yet and the current year has no digs
+  // (e.g. it's early January and last_dig_date was last year), jump to the
+  // year of the most recent addition so the calendar opens onto data instead
+  // of an empty grid. Once the user clicks a year chip we stop re-jumping.
+  useEffect(() => {
+    if (userSelectedYear) return;
+    const last = streaks?.last_dig_date;
+    if (!last) return;
+    const lastYear = parseInt(last.slice(0, 4), 10);
+    if (Number.isFinite(lastYear) && lastYear !== year) {
+      setYear(lastYear);
+    }
+  }, [streaks?.last_dig_date, userSelectedYear, year]);
+
+  const { data: calendar } = useQuery({
+    queryKey: ["digging-calendar", year],
+    queryFn: () => fetch(`${BRIDGE_URL}/api/digging/calendar?year=${year}`).then((r) => r.json()),
   });
 
   // Build 52x7 grid from calendar data
@@ -74,7 +89,7 @@ export default function DiggingPage() {
       {/* Year selector */}
       <div className="flex gap-2 mb-6">
         {[year - 1, year, year + 1].map((y) => (
-          <button key={y} onClick={() => setYear(y)}
+          <button key={y} onClick={() => { setYear(y); setUserSelectedYear(true); }}
             className="font-[family-name:var(--font-terminal)] text-[11px] px-3 py-1"
             style={{
               color: y === year ? "var(--color-accent)" : "var(--color-text-muted)",

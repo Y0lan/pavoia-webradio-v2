@@ -13,6 +13,21 @@ function SectionLabel({ label }: { label: string }) {
   );
 }
 
+// Empty-state placeholder for charts whose data source is currently empty
+// (e.g. library_tracks.bpm / genre / year_released aren't populated yet —
+// these come from ID3 tags + Mixed-In-Key we haven't wired into the disk
+// importer). An empty card reads as broken; this reads as "pending."
+function EmptyChart({ hint }: { hint: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-[120px] gap-1">
+      <span className="font-[family-name:var(--font-terminal)] text-[10px] tracking-[0.15em] uppercase"
+        style={{ color: "var(--color-text-muted)" }}>// NO DATA YET</span>
+      <span className="font-[family-name:var(--font-mono)] text-[10px]"
+        style={{ color: "var(--color-text-ghost)" }}>{hint}</span>
+    </div>
+  );
+}
+
 export default function StatsPage() {
   const { data: topArtists } = useQuery({
     queryKey: ["stats-top-artists"],
@@ -97,17 +112,21 @@ export default function StatsPage() {
       <div className="clip-card p-5 mt-4" style={{ background: "var(--color-bg-card)", border: "1px solid var(--border-subtle)" }}>
         <h3 className="font-[family-name:var(--font-terminal)] text-[10px] tracking-[0.1em] uppercase mb-4"
           style={{ color: "var(--color-text-muted)" }}>GENRES</h3>
-        <div className="flex flex-wrap gap-2">
-          {(genres ?? []).slice(0, 30).map((g: any) => {
-            const size = 10 + (g.count / maxGenre) * 8;
-            return (
-              <span key={g.genre} className="font-[family-name:var(--font-terminal)] uppercase tracking-[0.05em] px-2 py-0.5"
-                style={{ fontSize: `${size}px`, color: "var(--color-accent)", opacity: 0.4 + (g.count / maxGenre) * 0.6, border: "1px solid var(--border-subtle)" }}>
-                {g.genre}
-              </span>
-            );
-          })}
-        </div>
+        {genres && genres.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {genres.slice(0, 30).map((g: any) => {
+              const size = 10 + (g.count / maxGenre) * 8;
+              return (
+                <span key={g.genre} className="font-[family-name:var(--font-terminal)] uppercase tracking-[0.05em] px-2 py-0.5"
+                  style={{ fontSize: `${size}px`, color: "var(--color-accent)", opacity: 0.4 + (g.count / maxGenre) * 0.6, border: "1px solid var(--border-subtle)" }}>
+                  {g.genre}
+                </span>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyChart hint="Tracks need genre tags from ID3 ingest" />
+        )}
       </div>
 
       {/* ═══ THE TASTE ═══ */}
@@ -118,27 +137,35 @@ export default function StatsPage() {
         <div className="clip-card p-5" style={{ background: "var(--color-bg-card)", border: "1px solid var(--border-subtle)" }}>
           <h3 className="font-[family-name:var(--font-terminal)] text-[10px] tracking-[0.1em] uppercase mb-4"
             style={{ color: "var(--color-text-muted)" }}>BPM DISTRIBUTION</h3>
-          <div className="flex items-end gap-px h-[120px]">
-            {(bpm ?? []).map((b: any) => (
-              <div key={b.bpm} className="flex-1 min-w-[2px]" title={`${b.bpm} BPM: ${b.count}`}
-                style={{ height: `${(b.count / maxBpm) * 100}%`, background: "var(--color-accent)", opacity: 0.7 }} />
-            ))}
-          </div>
+          {bpm && bpm.length > 0 ? (
+            <div className="flex items-end gap-px h-[120px]">
+              {bpm.map((b: any) => (
+                <div key={b.bpm} className="flex-1 min-w-[2px]" title={`${b.bpm} BPM: ${b.count}`}
+                  style={{ height: `${(b.count / maxBpm) * 100}%`, background: "var(--color-accent)", opacity: 0.7 }} />
+              ))}
+            </div>
+          ) : (
+            <EmptyChart hint="BPM from Mixed-In-Key analysis" />
+          )}
         </div>
 
         {/* Decades */}
         <div className="clip-card p-5" style={{ background: "var(--color-bg-card)", border: "1px solid var(--border-subtle)" }}>
           <h3 className="font-[family-name:var(--font-terminal)] text-[10px] tracking-[0.1em] uppercase mb-4"
             style={{ color: "var(--color-text-muted)" }}>DECADES</h3>
-          {(decades ?? []).map((d: any) => (
-            <div key={d.decade} className="flex items-center gap-3 py-1">
-              <span className="font-[family-name:var(--font-terminal)] text-[11px] w-10" style={{ color: "var(--color-text-muted)" }}>{d.decade}s</span>
-              <div className="flex-1 h-3" style={{ background: "var(--color-bg-elevated)" }}>
-                <div className="h-full" style={{ width: `${(d.count / maxDecade) * 100}%`, background: "var(--color-accent)" }} />
+          {decades && decades.length > 0 ? (
+            decades.map((d: any) => (
+              <div key={d.decade} className="flex items-center gap-3 py-1">
+                <span className="font-[family-name:var(--font-terminal)] text-[11px] w-10" style={{ color: "var(--color-text-muted)" }}>{d.decade}s</span>
+                <div className="flex-1 h-3" style={{ background: "var(--color-bg-elevated)" }}>
+                  <div className="h-full" style={{ width: `${(d.count / maxDecade) * 100}%`, background: "var(--color-accent)" }} />
+                </div>
+                <span className="font-[family-name:var(--font-terminal)] text-[10px] w-8 text-right" style={{ color: "var(--color-text-muted)" }}>{d.count}</span>
               </div>
-              <span className="font-[family-name:var(--font-terminal)] text-[10px] w-8 text-right" style={{ color: "var(--color-text-muted)" }}>{d.count}</span>
-            </div>
-          ))}
+            ))
+          ) : (
+            <EmptyChart hint="Year needs ID3 / MusicBrainz tagging" />
+          )}
         </div>
       </div>
 
@@ -146,15 +173,19 @@ export default function StatsPage() {
       <div className="clip-card p-5 mt-4" style={{ background: "var(--color-bg-card)", border: "1px solid var(--border-subtle)" }}>
         <h3 className="font-[family-name:var(--font-terminal)] text-[10px] tracking-[0.1em] uppercase mb-4"
           style={{ color: "var(--color-text-muted)" }}>CAMELOT KEY WHEEL</h3>
-        <div className="flex flex-wrap gap-2">
-          {(keys ?? []).map((k: any) => (
-            <div key={k.key} className="text-center px-3 py-2"
-              style={{ background: "var(--color-bg-elevated)", border: "1px solid var(--border-subtle)" }}>
-              <div className="font-[family-name:var(--font-display)] text-[16px] font-bold" style={{ color: "var(--color-accent)" }}>{k.key}</div>
-              <div className="font-[family-name:var(--font-terminal)] text-[9px]" style={{ color: "var(--color-text-muted)" }}>{k.count}</div>
-            </div>
-          ))}
-        </div>
+        {keys && keys.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {keys.map((k: any) => (
+              <div key={k.key} className="text-center px-3 py-2"
+                style={{ background: "var(--color-bg-elevated)", border: "1px solid var(--border-subtle)" }}>
+                <div className="font-[family-name:var(--font-display)] text-[16px] font-bold" style={{ color: "var(--color-accent)" }}>{k.key}</div>
+                <div className="font-[family-name:var(--font-terminal)] text-[9px]" style={{ color: "var(--color-text-muted)" }}>{k.count}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyChart hint="Keys from Mixed-In-Key analysis" />
+        )}
       </div>
 
       {/* ═══ THE BEHAVIOR ═══ */}
