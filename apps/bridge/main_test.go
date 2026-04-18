@@ -111,6 +111,15 @@ func TestOverallHealth(t *testing.T) {
 			},
 			want: "degraded",
 		},
+		{
+			name: "pg_backup stale -> degraded (backups silently stopped)",
+			checks: map[string]string{
+				"mpd": "ok", "postgres": "ok", "plex": "not_used",
+				"redis": "not_connected", "meilisearch": "not_connected",
+				"disk_sync": "ok", "pg_backup": "stale",
+			},
+			want: "degraded",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

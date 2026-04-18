@@ -168,6 +168,10 @@ func main() {
 			// Disk importer freshness — flags if the library_tracks ingest has
 			// stopped converging, which /health previously couldn't see.
 			"disk_sync": diskSyncStatus(diskImporter),
+			// pg_backup heartbeat — last successful row in pg_backup_log. "stale"
+			// if no ok row in the last 30 hours, which an external monitor can
+			// alert on when the nightly cron has silently stopped.
+			"pg_backup": pgBackupStatus(healthCtx, database),
 		}
 		writeHealthResponse(w, checks, len(visibleStages))
 	})
@@ -383,6 +387,40 @@ func writeHealthResponse(w http.ResponseWriter, checks map[string]string, stageC
 	}
 }
 
+// pgBackupStatus reports the freshness of the nightly pg-backup cron. Queries
+// pg_backup_log for the most recent row with status='ok' and compares against
+// pgBackupStaleAfter (30h by default — covers one missed nightly + some slack).
+//   - "not_configured" if the database isn't connected
+//   - "never_ran"      table exists but has no ok rows yet
+//   - "stale"          last ok row older than 30h — watchdog should alert
+//   - "ok"             otherwise
+const pgBackupStaleAfter = 30 * time.Hour
+
+func pgBackupStatus(ctx context.Context, database *db.DB) string {
+	if database == nil {
+		return "not_configured"
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var lastOK *time.Time
+	err := database.Pool.QueryRow(queryCtx, `
+		SELECT MAX(written_at) FROM pg_backup_log WHERE status = 'ok'
+	`).Scan(&lastOK)
+	if err != nil {
+		// Table missing (migration hasn't run) or DB query failed — report
+		// "never_ran" rather than "down" because the bridge itself is healthy;
+		// the backup cron just hasn't written anything yet.
+		return "never_ran"
+	}
+	if lastOK == nil {
+		return "never_ran"
+	}
+	if time.Since(*lastOK) > pgBackupStaleAfter {
+		return "stale"
+	}
+	return "ok"
+}
+
 // diskSyncStatus returns the /health check value for the disk importer.
 //   - "not_configured" if the importer wasn't wired (missing DATABASE_URL or MUSIC_BASE_PATH)
 //   - "never_ran"      if wired but no SyncOnce has completed yet (cold start)
@@ -425,6 +463,7 @@ func overallHealth(checks map[string]string) string {
 		// "not_used" is explicit "wired into the response shape for downstream
 		// monitoring, but this bridge doesn't depend on the dep" — post-Phase-E
 		// Plex is the only one, but future deprecations can reuse the same token.
+		// "never_ran" is cold-start — flags as degraded so it surfaces.
 		if status == "ok" || status == "not_connected" || status == "not_configured" || status == "not_used" {
 			continue
 		}
