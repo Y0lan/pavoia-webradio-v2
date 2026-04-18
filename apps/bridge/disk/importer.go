@@ -172,7 +172,14 @@ func (im *Importer) SyncOnce(ctx context.Context) (*SyncResult, error) {
 		result.StagesRemoved += removed
 	}
 
-	im.lastGeneration = manifest.GenerationID
+	// Advance the "done" marker only on a clean run. If any playlist threw an
+	// error, stubs failed, soft-delete failed, or prune failed, we leave
+	// lastGeneration unchanged so the next tick retries against this same
+	// manifest instead of skipping it. Otherwise a transient DB blip could
+	// permanently skip a generation's worth of changes.
+	if len(result.Errors) == 0 {
+		im.lastGeneration = manifest.GenerationID
+	}
 
 	slog.Info("disk sync: complete",
 		"generation", manifest.GenerationID,
@@ -203,13 +210,20 @@ func (im *Importer) upsertArtists(ctx context.Context, records []ArtistRecord) (
 			continue
 		}
 		var id int64
+		// Tags policy: the enrichment worker (Last.fm + MusicBrainz) owns the
+		// `tags` column once `enriched_at` is set. The disk importer writes
+		// Plex-sourced tags only when the row is new OR has never been enriched,
+		// so the 2-min disk tick doesn't stomp enrichment data.
 		err := tx.QueryRow(ctx, `
 			INSERT INTO artists (name, bio, image_url, tags, updated_at)
 			VALUES ($1, $2, NULLIF($3, ''), $4, now())
 			ON CONFLICT ((lower(name))) DO UPDATE SET
 				bio        = COALESCE(EXCLUDED.bio, artists.bio),
 				image_url  = COALESCE(EXCLUDED.image_url, artists.image_url),
-				tags       = EXCLUDED.tags,
+				tags       = CASE
+				               WHEN artists.enriched_at IS NULL THEN EXCLUDED.tags
+				               ELSE artists.tags
+				             END,
 				updated_at = now()
 			RETURNING id
 		`, a.Name, a.Bio, a.ThumbPath, mergeTagSlices(a.Genres, a.Moods)).Scan(&id)
@@ -277,7 +291,7 @@ func (im *Importer) syncPlaylistFolder(
 	var kept []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".mp3") && !strings.HasSuffix(name, ".flac") && !strings.HasSuffix(name, ".wav") {
+		if !isAudioFile(name) {
 			continue
 		}
 		audioPath := filepath.Join(folder, name)
@@ -445,6 +459,21 @@ func (im *Importer) materializeArtistStubs(ctx context.Context) (int, error) {
 		return inserted, err
 	}
 	return inserted, nil
+}
+
+// audioExtensions lists every suffix the Python sync emits into Webradio folders.
+// Python may convert FLAC → MP3, but .flac/.opus/.m4a/.aac/.ogg still appear
+// directly for formats it passes through.
+var audioExtensions = []string{".mp3", ".flac", ".wav", ".opus", ".m4a", ".aac", ".ogg"}
+
+func isAudioFile(name string) bool {
+	lower := strings.ToLower(name)
+	for _, ext := range audioExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func fileExt(name string) string {

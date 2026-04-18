@@ -24,13 +24,29 @@ import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from subprocess import call
 from time import sleep
 from multiprocessing import Pool, cpu_count
 from collections import defaultdict
 from plexapi.myplex import MyPlexAccount
 from tqdm import tqdm
+
+
+# --- Timestamp helpers ---
+# All timestamps are written in UTC ISO-8601 with a trailing Z. The previous
+# format was datetime.now() with a local wall-clock string, which parsed as UTC
+# on the Go side — silently shifting added_at by the host's offset on any
+# non-UTC server and corrupting /digging day/week grouping.
+
+_TS_FMT = '%Y-%m-%dT%H:%M:%SZ'
+
+def _utc_now_str():
+    return datetime.now(timezone.utc).strftime(_TS_FMT)
+
+def _utc_ts_str(epoch_seconds):
+    """Convert a unix timestamp to a UTC ISO-8601 string."""
+    return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).strftime(_TS_FMT)
 
 # --- Configuration from env ---
 SERVER_MUSIC = os.environ.get('SERVER_MUSIC', '/home/yolan/files/plex_music_library/opus/')
@@ -148,13 +164,11 @@ def write_sync_manifest(artifact_paths, generation_id, counts):
             "path": os.path.relpath(path, WEBRADIO_FOLDER),
             "sha256": file_sha256(path),
             "size_bytes": os.path.getsize(path),
-            "mtime": datetime.fromtimestamp(
-                os.path.getmtime(path)
-            ).strftime('%Y-%m-%d %H:%M:%S'),
+            "mtime": _utc_ts_str(os.path.getmtime(path)),
         }
     manifest = {
         "generation_id": generation_id,
-        "written_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "written_at": _utc_now_str(),
         "counts": counts,
         "artifacts": artifacts,
     }
@@ -242,8 +256,8 @@ def extract_track_metadata(track, playlist_name):
             "metadata": {
                 "plex_rating_key": track.ratingKey,
                 "plex_guid": track.guid,
-                "added_to_webradio": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                "updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "added_to_webradio": _utc_now_str(),
+                "updated_at": _utc_now_str(),
                 "playlists": [playlist_name]  # Track which playlists contain this track
             }
         }
@@ -405,10 +419,10 @@ def save_metadata_json(metadata, json_path, audio_file_path):
             # For new JSON files, use the creation/modification time of the audio file
             file_stat = os.stat(audio_file_path)
             creation_time = file_stat.st_mtime
-            metadata['metadata']['added_to_webradio'] = datetime.fromtimestamp(creation_time).strftime('%Y-%m-%d %H:%M:%S')
+            metadata['metadata']['added_to_webradio'] = _utc_ts_str(creation_time)
         
         # Update the updated_at timestamp to current time
-        metadata['metadata']['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        metadata['metadata']['updated_at'] = _utc_now_str()
 
         atomic_write_json(json_path, metadata)
         return True
@@ -431,7 +445,7 @@ def save_global_metadata():
         for artist_key in ARTISTS_DATA:
             ARTISTS_DATA[artist_key]["playlists"] = sorted(list(ARTISTS_DATA[artist_key]["playlists"]))
 
-        written_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        written_at = _utc_now_str()
 
         # --- artists.json ---
         artists_path = os.path.join(WEBRADIO_FOLDER, 'artists.json')
@@ -495,7 +509,8 @@ def save_global_metadata():
         print(f"✅ Saved {len(tracks_index)} tracks to tracks_index.json")
 
         # --- sync_manifest.json (LAST) ---
-        generation_id = datetime.now().strftime('%Y%m%dT%H%M%S')
+        # generation_id is UTC so it monotonically sorts even if the host tz shifts.
+        generation_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
         write_sync_manifest(
             {
                 "artists": artists_path,
@@ -606,8 +621,14 @@ def create_symlink(source_path, link_path):
         print(f"Error creating symlink: {e}")
         return "error"
 
-def process_song(song, dest_folder, playlist_name):
-    """Process a single song - create symlink/convert and save metadata JSON."""
+def process_song(song, dest_folder, playlist_name, keep_paths=None):
+    """Process a single song - create symlink/convert and save metadata JSON.
+
+    keep_paths is an optional set that the caller populates with every produced
+    audio-file basename so process_playlist can later diff the folder and remove
+    stale symlinks that no longer belong to this playlist (Phase D follow-up:
+    prevents the Go importer from seeing a ghost track that Plex removed).
+    """
     song_path = get_local_path(song)
     if not song_path:
         return f"❌ Could not get path for: {song.title}"
@@ -640,10 +661,11 @@ def process_song(song, dest_folder, playlist_name):
             audio_result = f"📄 File exists: {filename}"
         else:
             audio_result = f"❌ Failed to symlink: {filename}"
-        
+
         # Save JSON metadata for symlinked file
         json_path = f"{dest_path}.json"
         audio_file_for_metadata = dest_path
+        kept_basename = filename
 
     # Handle FLAC files - convert to MP3
     elif file_ext == '.flac':
@@ -658,17 +680,21 @@ def process_song(song, dest_folder, playlist_name):
                 audio_result = f"✅ Converted to MP3: {mp3_filename}"
             else:
                 audio_result = f"❌ Failed to convert: {filename}"
-        
+
         # Update metadata for converted file
         if metadata:
             metadata["file"]["path"] = mp3_filename
-        
+
         # Save JSON metadata for converted file
         json_path = f"{mp3_path}.json"
         audio_file_for_metadata = mp3_path
+        kept_basename = mp3_filename
 
     else:
         return f"⚠️ Unsupported format ({file_ext}): {filename}"
+
+    if keep_paths is not None and kept_basename:
+        keep_paths.add(kept_basename)
 
     # Save metadata JSON
     if metadata:
@@ -703,6 +729,11 @@ def process_playlist(playlist):
 
     dest_folder = prepare_playlist_folder(playlist_name)
     songs = playlist.items()
+    # Phase D follow-up (F-D2.1): collect the set of basenames we should keep
+    # so a stale-file sweep at the end of the playlist can delete symlinks for
+    # tracks Plex removed. Without this, the Go importer can't tell whether a
+    # symlink on disk still belongs to the playlist.
+    keep_basenames = set()
 
     results = {
         'created': 0,
@@ -715,7 +746,10 @@ def process_playlist(playlist):
 
     with tqdm(total=len(songs), desc=f"Processing {playlist_name}", unit="song") as pbar:
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(process_song, song, dest_folder, playlist_name): song for song in songs}
+            futures = {
+                executor.submit(process_song, song, dest_folder, playlist_name, keep_basenames): song
+                for song in songs
+            }
 
             for future in as_completed(futures):
                 song = futures[future]
@@ -755,17 +789,73 @@ def process_playlist(playlist):
                     print(f"\nError processing {song.title}: {e}")
                 pbar.update(1)
 
+    # Phase D follow-up (F-D2.1): sweep stale audio + sidecar files from the
+    # playlist folder. Anything present on disk that isn't in keep_basenames
+    # belongs to a track Plex no longer has in this playlist; remove it so
+    # the Go disk importer's soft-delete logic converges on playlist removals.
+    swept_audio, swept_json = _sweep_stale(dest_folder, keep_basenames)
+    if swept_audio or swept_json:
+        print(f"  Stale cleanup: removed {swept_audio} audio + {swept_json} sidecar file(s)")
+
     print(f"\nPlaylist '{playlist_name}' summary:")
     print(f"  Audio files:")
     print(f"    - New symlinks created: {results['created']}")
     print(f"    - Files converted: {results['converted']}")
     print(f"    - Already existing: {results['exists']}")
     print(f"    - Failed: {results['failed']}")
+    print(f"    - Stale removed: {swept_audio}")
     print(f"  Metadata:")
     print(f"    - JSON files saved: {results['json_saved']}")
     print(f"    - JSON files failed: {results['json_failed']}")
+    print(f"    - Stale sidecars removed: {swept_json}")
 
     return results
+
+
+def _sweep_stale(folder, keep_basenames):
+    """Remove audio + sidecar files from `folder` that aren't in keep_basenames.
+
+    Only touches *.mp3, *.flac, *.opus, *.wav, *.m4a, *.aac, *.ogg plus matching
+    .json sidecars. Refuses to sweep if keep_basenames is empty (defensive: an
+    empty set almost always means the Plex fetch failed upstream).
+    """
+    if not keep_basenames:
+        return (0, 0)
+    audio_exts = ('.mp3', '.flac', '.opus', '.wav', '.m4a', '.aac', '.ogg')
+    removed_audio = 0
+    removed_json = 0
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return (0, 0)
+    for name in entries:
+        lower = name.lower()
+        if lower.endswith(audio_exts):
+            if name not in keep_basenames:
+                try:
+                    os.remove(os.path.join(folder, name))
+                    removed_audio += 1
+                except OSError:
+                    pass
+                sidecar = os.path.join(folder, name + '.json')
+                if os.path.exists(sidecar):
+                    try:
+                        os.remove(sidecar)
+                        removed_json += 1
+                    except OSError:
+                        pass
+        elif lower.endswith('.json') and name.endswith('.mp3.json'):
+            # Orphan sidecar without a matching audio file in keep set.
+            basename = name[:-5]  # strip ".json"
+            if basename not in keep_basenames and not os.path.exists(
+                os.path.join(folder, basename)
+            ):
+                try:
+                    os.remove(os.path.join(folder, name))
+                    removed_json += 1
+                except OSError:
+                    pass
+    return (removed_audio, removed_json)
 
 def main():
     """Main function to process playlists."""

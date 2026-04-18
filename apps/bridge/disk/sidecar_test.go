@@ -81,7 +81,10 @@ func TestSidecarAddedAt(t *testing.T) {
 		fallback time.Time
 		wantYear int
 	}{
-		{"real timestamp", `"2025-08-13 12:49:12"`, time.Time{}, 2025},
+		{"rfc3339 UTC (preferred format)", `"2025-08-13T12:49:12Z"`, time.Time{}, 2025},
+		{"legacy naive (pre-Phase-D-follow-up)", `"2025-08-13 12:49:12"`, time.Time{}, 2025},
+		{"ISO-8601 T-separator with microseconds (observed in old sidecars)", `"2025-08-11T19:33:06.634322"`, time.Time{}, 2025},
+		{"ISO-8601 T-separator no tz no fractional", `"2025-08-11T19:33:06"`, time.Time{}, 2025},
 		{"malformed → fallback mtime", `"not a date"`, time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC), 2024},
 		{"empty + zero mtime → now", `""`, time.Time{}, time.Now().UTC().Year()},
 	}
@@ -95,6 +98,22 @@ func TestSidecarAddedAt(t *testing.T) {
 				t.Errorf("year = %d, want %d", got, tc.wantYear)
 			}
 		})
+	}
+}
+
+// TestAddedAt_RFC3339_AlwaysUTC guards against a regression where a non-UTC
+// host would shift times during parsing. The RFC3339 Z suffix is explicit, so
+// the parsed time must come back as UTC regardless of local tz.
+func TestAddedAt_RFC3339_AlwaysUTC(t *testing.T) {
+	body := `{"track":{"title":"t"},"metadata":{"added_to_webradio":"2025-08-13T12:49:12Z"}}`
+	p := writeSidecar(t, t.TempDir(), "t.mp3.json", body)
+	sc, _ := LoadSidecar(p)
+	got := sc.AddedAt(time.Time{})
+	if got.Location() != time.UTC {
+		t.Errorf("location = %v, want UTC", got.Location())
+	}
+	if got.Hour() != 12 {
+		t.Errorf("hour = %d, want 12 (UTC)", got.Hour())
 	}
 }
 

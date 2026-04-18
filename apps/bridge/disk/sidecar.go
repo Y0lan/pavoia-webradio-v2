@@ -59,18 +59,40 @@ func LoadSidecar(path string) (*Sidecar, error) {
 	return &s, nil
 }
 
-// AddedAt parses the Python-written "YYYY-MM-DD HH:MM:SS" timestamp. Falls
-// back to the file's mtime if the string is malformed, and finally to now()
-// so a sidecar with no date doesn't crash the import.
+// addedAtLayouts covers every timestamp format the Python writer has emitted
+// across the project's lifetime. In order of preference:
+//
+//  1. RFC3339 UTC with Z suffix — what the Phase D follow-up writes.
+//  2. ISO-8601 T-separator, fractional seconds, no tz — older save_metadata_json
+//     that used datetime.now().isoformat() (naive local; treat as UTC since host
+//     is UTC).
+//  3. ISO-8601 T-separator, seconds resolution, no tz.
+//  4. Space-separated naive "YYYY-MM-DD HH:MM:SS" — oldest format.
+//
+// Go's time.Parse treats missing-tz layouts as UTC, which matches the Python
+// writer's assumption on a UTC host.
+var addedAtLayouts = []string{
+	time.RFC3339,
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05",
+}
+
+// AddedAt parses the Python-written timestamp. Falls back to the file's mtime
+// if every layout fails, then to now() so a sidecar with no date doesn't crash
+// the import.
 func (s *Sidecar) AddedAt(fallbackMTime time.Time) time.Time {
-	const layout = "2006-01-02 15:04:05"
-	if t, err := time.Parse(layout, s.Metadata.AddedToWebradio); err == nil {
-		return t
+	if s.Metadata.AddedToWebradio != "" {
+		for _, layout := range addedAtLayouts {
+			if t, err := time.Parse(layout, s.Metadata.AddedToWebradio); err == nil {
+				return t.UTC()
+			}
+		}
 	}
 	if !fallbackMTime.IsZero() {
 		return fallbackMTime
 	}
-	return time.Now()
+	return time.Now().UTC()
 }
 
 // DurationSeconds rounds duration_ms to an integer second, returning nil if
