@@ -67,9 +67,19 @@ echo "  ✓ bridge-linux built"
 #    works for RUNTIME; we use that for `node server.js` later.
 echo "[2/6] Building frontend..."
 cd apps/web
-NEXT_TELEMETRY_DISABLED=1 npm run build
+# Bake the public bridge URL into the build. NEXT_PUBLIC_* vars are inlined at
+# build time — without this, BRIDGE_URL defaults to "" which resolves to the
+# Next.js origin (:13000) and every fetch/WS goes to a dead route. There is no
+# reverse proxy in front of the bridge on Whatbox; callers must hit :3001
+# directly. Allow override via env for dev/staging.
+#
+# CORS is handled by the bridge (see main.go corsMiddleware — it echoes the
+# request Origin so authenticated cookies would work if we ever add auth,
+# and falls back to "*" for listeners).
+: "${PUBLIC_BRIDGE_URL:=http://orange.whatbox.ca:${BRIDGE_PORT}}"
+NEXT_PUBLIC_BRIDGE_URL="$PUBLIC_BRIDGE_URL" NEXT_TELEMETRY_DISABLED=1 npm run build
 cd ../..
-echo "  ✓ frontend built (standalone output)"
+echo "  ✓ frontend built (standalone output, bridge=$PUBLIC_BRIDGE_URL)"
 
 # 3. Upload
 #
