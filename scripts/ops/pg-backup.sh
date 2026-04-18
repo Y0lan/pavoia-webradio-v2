@@ -28,18 +28,21 @@ mkdir -p "$BACKUP_DIR"
 STDERR_FILE=$(mktemp /tmp/pg-backup-err.XXXXXX)
 trap 'rm -f "$STDERR_FILE"' EXIT
 
-# Include the PID so two runs in the same second (admin kick overlapping with
-# cron, or same-host cron + a manual retry) don't both write the same tempfile
-# path and clobber each other mid-flight. The final rename to the un-PID'd
-# name still happens atomically via `mv`.
+# Include the PID in BOTH the tempfile and the final artifact name. Without it,
+# two same-second successes (admin kick overlapping with cron, or back-to-back
+# manual retries) each mv their tempfile into the same canonical path; the
+# second mv clobbers the first and the heartbeat row's `backup_path` now points
+# at a file that was replaced by someone else's dump. Rotation still works —
+# `gaende-*.sql.gz` matches PID-suffixed files fine.
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
-DUMP_PATH="$BACKUP_DIR/gaende-$TIMESTAMP.sql.gz"
-DUMP_TMP="$BACKUP_DIR/gaende-$TIMESTAMP.$$.sql.gz.tmp"
+DUMP_PATH="$BACKUP_DIR/gaende-$TIMESTAMP.$$.sql.gz"
+DUMP_TMP="$DUMP_PATH.tmp"
 
 log_heartbeat() {
-    # Writes one row to pg_backup_log. Uses psql parameterized variables
-    # (:'var') to avoid injection hazards from env-derived paths / error
-    # messages that might contain quotes or dollar-sign sequences.
+    # Writes one row to pg_backup_log. Uses psql's `:'var'` substitution
+    # (heredoc, not -c — the :'var' macro only expands in script input) to
+    # avoid injection hazards from env-derived paths / stderr strings that
+    # might contain quotes or $$ dollar-quote sequences.
     local status="$1" rows="$2" size="$3" path="$4" err="$5"
     PGPASSWORD="$PGPASSWORD" psql -v ON_ERROR_STOP=1 -q \
         -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" \
@@ -47,15 +50,16 @@ log_heartbeat() {
         -v "h_rows=$rows" \
         -v "h_size=$size" \
         -v "h_path=$path" \
-        -v "h_err=$err" \
-        -c "INSERT INTO pg_backup_log (status, rows_dumped, size_bytes, backup_path, error)
-            VALUES (
-                :'h_status',
-                NULLIF(:'h_rows','')::bigint,
-                NULLIF(:'h_size','')::bigint,
-                NULLIF(:'h_path',''),
-                NULLIF(:'h_err','')
-            );" 2>&1 || echo "pg-backup: heartbeat write failed (non-fatal)" >&2
+        -v "h_err=$err" <<'SQL' 2>&1 || echo "pg-backup: heartbeat write failed (non-fatal)" >&2
+INSERT INTO pg_backup_log (status, rows_dumped, size_bytes, backup_path, error)
+VALUES (
+    :'h_status',
+    NULLIF(:'h_rows','')::bigint,
+    NULLIF(:'h_size','')::bigint,
+    NULLIF(:'h_path',''),
+    NULLIF(:'h_err','')
+);
+SQL
 }
 
 # --- Dump via ephemeral pg-16 container.

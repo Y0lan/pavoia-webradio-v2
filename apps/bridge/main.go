@@ -411,11 +411,20 @@ func pgBackupStatus(ctx context.Context, database *db.DB) string {
 	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	// Two signals: last ok + last failed. A fresh ok that happened AFTER the
-	// last failed clears the flag — a manual admin run that failed shouldn't
-	// poison /health if the nightly cron then ran cleanly. "failing" only
-	// when the latest failure is more recent than the latest ok AND within
-	// the failure window.
+	// Decision table for /health.pg_backup:
+	//
+	//   lastOK recent (< okWindow)    → "ok"  (a manual failure after a clean
+	//                                   nightly run is not an ops concern; the
+	//                                   cron is still converging)
+	//   lastOK stale (> okWindow)     → "failing" if lastFailed within
+	//                                   failureWindow, else "stale"
+	//   no lastOK but recent lastFail → "failing"
+	//   no rows at all                → "never_ran"
+	//
+	// okWindow is 24h — the nightly cron's own interval. failureWindow is 30h
+	// so a last-failed row from an hour before the missed nightly still counts.
+	const okWindow = 24 * time.Hour
+
 	var lastOKAt, lastFailedAt *time.Time
 	err := database.Pool.QueryRow(queryCtx, `
 		SELECT
@@ -423,25 +432,27 @@ func pgBackupStatus(ctx context.Context, database *db.DB) string {
 			(SELECT MAX(written_at) FROM pg_backup_log WHERE status = 'failed')
 	`).Scan(&lastOKAt, &lastFailedAt)
 	if err != nil {
-		// Table missing (migration hasn't run) or DB query failed.
 		return "never_ran"
 	}
 	if lastOKAt == nil && lastFailedAt == nil {
 		return "never_ran"
 	}
-	// "failing" if failure is the most-recent event AND recent.
-	if lastFailedAt != nil &&
-		(lastOKAt == nil || lastFailedAt.After(*lastOKAt)) &&
-		time.Since(*lastFailedAt) <= pgBackupFailureWindow {
+
+	// Recent ok dominates: a successful nightly within the last 24h means the
+	// cron is working, regardless of what manual invocations did afterwards.
+	if lastOKAt != nil && time.Since(*lastOKAt) <= okWindow {
+		return "ok"
+	}
+
+	// No recent ok. If there's a recent failure, surface it urgently;
+	// otherwise it's silent-stopped (stale).
+	if lastFailedAt != nil && time.Since(*lastFailedAt) <= pgBackupFailureWindow {
 		return "failing"
 	}
 	if lastOKAt == nil {
 		return "never_ran"
 	}
-	if time.Since(*lastOKAt) > pgBackupStaleAfter {
-		return "stale"
-	}
-	return "ok"
+	return "stale"
 }
 
 // diskSyncStatus returns the /health check value for the disk importer.
