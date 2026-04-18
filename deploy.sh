@@ -189,26 +189,26 @@ pkill -TERM -f -- "\$WEB_SERVER" 2>/dev/null || true
 sleep 2
 pkill -KILL -f -- "\$WEB_SERVER" 2>/dev/null || true
 
-# Belt-and-suspenders: when Next.js runs from standalone, the cmdline shows
-# server.js so our path-based pkill above catches it. But after it has been
-# running a while, /proc/PID/cmdline can show as "next-server (v16.2.1)"
-# instead — a dev-only flourish Next applies via process.title. The path
-# pattern doesn't match that, which leaves a stale server holding :13000
-# and the new deploy silently fails with EADDRINUSE. We scope the fallback
-# to processes listening on OUR web port so we can't accidentally reap an
-# unrelated Next app on this account.
-if command -v ss >/dev/null 2>&1; then
-    STALE_PID=\$(ss -tlnp 2>/dev/null | awk -v port=":${WEB_PORT}" '\$4 ~ port { print \$0 }' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
-    if [ -n "\$STALE_PID" ]; then
-        TITLE=\$(ps -p "\$STALE_PID" -o comm= 2>/dev/null || true)
-        if [ -n "\$TITLE" ] && [ "\$TITLE" != "node" ]; then
-            echo "  killing stale web on :${WEB_PORT} (PID \$STALE_PID, title '\$TITLE')"
-            kill -TERM "\$STALE_PID" 2>/dev/null || true
-            sleep 2
-            kill -KILL "\$STALE_PID" 2>/dev/null || true
-        fi
+# Belt-and-suspenders: after Next.js has been running a while, /proc/PID/cmdline
+# rewrites to "next-server (v16.2.1)" (a dev flourish Next applies via
+# process.title). That renders the path-based pkill above a no-op and the
+# stale server keeps holding :13000; the new deploy silently fails with
+# EADDRINUSE and the old server keeps serving pre-deploy HTML that references
+# chunks that no longer exist on disk. Shared hosting blocks ss -tlnp for
+# non-root users, so we can't scope by listening port. Instead: find every
+# next-server matching our cwd (via /proc/PID/cwd symlink), which scopes
+# tightly to this install and can't sweep another Next app on the same
+# account that lives in a different directory.
+INSTALL_CWD="\$HOME/gaende-radio"
+for pid in \$(pgrep -f "next-server" 2>/dev/null || true); do
+    PID_CWD=\$(readlink "/proc/\$pid/cwd" 2>/dev/null || echo "")
+    if [ -n "\$PID_CWD" ] && [ "\$PID_CWD" = "\$INSTALL_CWD" ] || [[ "\$PID_CWD" == "\$INSTALL_CWD"/* ]]; then
+        echo "  killing stale next-server \$pid (cwd=\$PID_CWD)"
+        kill -TERM "\$pid" 2>/dev/null || true
+        sleep 2
+        kill -KILL "\$pid" 2>/dev/null || true
     fi
-fi
+done
 PORT="${WEB_PORT}" HOSTNAME=0.0.0.0 nohup "\$MISE_NODE" "\$WEB_SERVER" > ~/gaende-radio/web.log 2>&1 &
 echo "  Web PID: \$!"
 REMOTE
