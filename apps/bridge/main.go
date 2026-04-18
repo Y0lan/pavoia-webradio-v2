@@ -25,7 +25,6 @@ import (
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/enrichment"
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/hub"
 	mpdpool "github.com/Y0lan/pavoia-webradio-v2/apps/bridge/mpd"
-	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/plex"
 )
 
 func main() {
@@ -115,17 +114,9 @@ func main() {
 	// verifies sha256 against the manifest, upserts library_tracks + track_stages +
 	// artists, and soft-deletes rows that are no longer on disk.
 	//
-	// Replaces the direct Plex API client role — the bridge no longer authenticates
-	// against Plex. The plex package is kept compiled (for Phase E to cleanly remove)
-	// but its SyncWorker is no longer wired. Plex-health probing stays available for
-	// the /health endpoint's reachability signal.
-	var plexClient *plex.Client
-	if cfg.PlexURL != "" && cfg.PlexToken != "" {
-		plexClient = plex.NewClient(cfg.PlexURL, cfg.PlexToken)
-		// Plex reachability is advisory only: /health surfaces it, but nothing in
-		// the bridge depends on Plex being up. Scheduled for removal in Phase E.
-	}
-
+	// The bridge is no longer a Plex API client — all Plex auth lives in the Python
+	// sync. PLEX_URL / PLEX_TOKEN env vars are accepted for backward compatibility
+	// with pre-Phase-E .gaende.env files but have no effect.
 	if database != nil && cfg.MusicBasePath != "" {
 		importer := disk.NewImporter(database.Pool, cfg, cfg.MusicBasePath)
 		importer.Start(ctx, 2*time.Minute)
@@ -163,21 +154,16 @@ func main() {
 				dbStatus = "down"
 			}
 		}
-		plexStatus := "not_configured"
-		if plexClient != nil {
-			if plexClient.HealthyWithTimeout(3 * time.Second) {
-				plexStatus = "ok"
-			} else {
-				plexStatus = "down"
-			}
-		}
-
 		checks := map[string]string{
 			"mpd":         mpdStatus,
 			"postgres":    dbStatus,
 			"redis":       "not_connected",
 			"meilisearch": "not_connected",
-			"plex":        plexStatus,
+			// Plex check removed in Phase E — the bridge no longer authenticates
+			// against Plex (Python sync is the only consumer). Kept in the response
+			// shape as "not_used" so downstream dashboards see an explicit signal
+			// rather than a silently-disappearing key.
+			"plex":        "not_used",
 		}
 		writeHealthResponse(w, checks, len(visibleStages))
 	})
@@ -405,7 +391,10 @@ func overallHealth(checks map[string]string) string {
 
 	degraded := false
 	for name, status := range checks {
-		if status == "ok" || status == "not_connected" || status == "not_configured" {
+		// "not_used" is explicit "wired into the response shape for downstream
+		// monitoring, but this bridge doesn't depend on the dep" — post-Phase-E
+		// Plex is the only one, but future deprecations can reuse the same token.
+		if status == "ok" || status == "not_connected" || status == "not_configured" || status == "not_used" {
 			continue
 		}
 		if critical[name] && status == "down" {

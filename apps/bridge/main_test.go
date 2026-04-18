@@ -184,8 +184,16 @@ func TestHealthHandler(t *testing.T) {
 		{
 			name: "all green returns 200 ok",
 			checks: map[string]string{
-				"mpd": "ok", "postgres": "ok", "plex": "ok",
+				"mpd": "ok", "postgres": "ok", "plex": "not_used",
 				"redis": "not_connected", "meilisearch": "not_connected",
+			},
+			wantStatus: "ok", wantCode: 200,
+		},
+		{
+			name: "not_used dependencies are neutral",
+			checks: map[string]string{
+				"mpd": "ok", "postgres": "ok", "plex": "not_used",
+				"redis": "not_used", "meilisearch": "not_used",
 			},
 			wantStatus: "ok", wantCode: 200,
 		},
@@ -206,7 +214,7 @@ func TestHealthHandler(t *testing.T) {
 			wantStatus: "down", wantCode: 503,
 		},
 		{
-			name: "plex down alone returns 200 degraded (advisory only)",
+			name: "plex down alone returns 200 degraded (kept for monitoring contract)",
 			checks: map[string]string{
 				"mpd": "ok", "postgres": "ok", "plex": "down",
 				"redis": "not_connected", "meilisearch": "not_connected",
