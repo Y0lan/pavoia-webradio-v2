@@ -71,11 +71,15 @@ func (h *HistoryHandlers) HandleHistory(w http.ResponseWriter, r *http.Request) 
 		args = append(args, "%"+artist+"%")
 	}
 	if genre := q.Get("genre"); genre != "" {
-		// Join with library_tracks for genre filter
-		// No deleted_at filter: a past play of a now-deleted track still had a
-		// genre, and the user asking "plays of techno tracks" wants to see
-		// historical techno plays even if those tracks were later removed.
-		where += " AND file_path IN (SELECT file_path FROM library_tracks WHERE genre = " + nextArg() + ")"
+		// Genre filter uses track_plays.genre (migration 006) — the snapshot
+		// captured at play time. Reading from the mutable library_tracks.genre
+		// would let a later retag rewrite historical matches; this column is
+		// immutable once inserted.
+		//
+		// Rows logged before migration 006 have genre=NULL and are correctly
+		// excluded from any genre filter (we don't know what genre they had
+		// at play time).
+		where += " AND genre = " + nextArg()
 		args = append(args, genre)
 	}
 	if search := q.Get("search"); search != "" {

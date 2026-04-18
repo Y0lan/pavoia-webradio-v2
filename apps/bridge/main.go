@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/api"
@@ -310,10 +312,66 @@ func main() {
 
 func logPlay(ctx context.Context, database *db.DB, np mpdpool.NowPlaying, musicBasePath string) {
 	filePath := canonicalFilePath(np.Song["file"], musicBasePath)
+
+	// Best-effort genre snapshot (migration 006). Semantics:
+	//
+	//   * The lookup runs in its own 500ms-timeout context so a flapping DB
+	//     doesn't stall the single-goroutine play-logger queue (which would
+	//     back-pressure into the 64-slot playCh and drop events). The 500ms
+	//     bound covers pool-acquire + query together; under pool saturation
+	//     (MaxConns=10) a play can still wait the full 500ms before falling
+	//     back to genre=NULL. That's the intended ceiling — missing one
+	//     snapshot is strictly better than dropping a play event.
+	//   * "Not found" (track not yet in library_tracks) and "NULL value"
+	//     (column unset) both yield genre=NULL on the play row — correctly
+	//     "unknown" rather than a guess.
+	//   * A transient DB error beyond ErrNoRows is logged at warn, not swallowed.
+	//   * Soft-deleted library_tracks rows still yield a valid snapshot — a
+	//     track removed the day after it played should still carry its genre
+	//     in history.
+	//   * Stale-read window: library_tracks.genre is written by the disk
+	//     importer inside a per-playlist transaction that can cover 100s of
+	//     tracks (see disk/importer.go:syncPlaylistFolder). If a retag for
+	//     this file_path is sitting uncommitted during that walk, our read
+	//     sees the pre-retag value. The snapshot is "genre as-of last-
+	//     committed generation," not "as-of this exact instant." Acceptable
+	//     because the only remaining ambiguity is "did the sync 30 seconds
+	//     ago see the retag?" — which is always going to be Python-timing-
+	//     dependent regardless.
+	var genre *string
+	if filePath != "" {
+		lookupCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		var g *string
+		err := database.Pool.QueryRow(lookupCtx,
+			`SELECT genre FROM library_tracks WHERE file_path = $1`, filePath,
+		).Scan(&g)
+		cancel()
+		switch {
+		case err == nil:
+			if g != nil && *g != "" {
+				genre = g
+			}
+		case errors.Is(err, pgx.ErrNoRows):
+			// Track not yet ingested; leave genre NULL.
+		default:
+			slog.Warn("logPlay: genre snapshot lookup failed", "stage", np.StageID, "file", filePath, "error", err)
+			// Fall through to INSERT with genre=NULL — losing the snapshot is
+			// strictly better than losing the play event.
+		}
+	}
+
 	_, err := database.Pool.Exec(ctx, `
-		INSERT INTO track_plays (stage_id, artist, title, album, file_path, duration_sec, played_at)
-		VALUES ($1, $2, $3, $4, $5, $6, now())
-	`, np.StageID, np.Song["Artist"], np.Song["Title"], np.Song["Album"], filePath, parseDurationSec(np.Duration))
+		INSERT INTO track_plays (stage_id, artist, title, album, file_path, duration_sec, genre, played_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+	`,
+		np.StageID,
+		np.Song["Artist"],
+		np.Song["Title"],
+		np.Song["Album"],
+		filePath,
+		parseDurationSec(np.Duration),
+		genre,
+	)
 	if err != nil {
 		slog.Warn("failed to log play", "stage", np.StageID, "error", err)
 	}
