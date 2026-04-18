@@ -99,7 +99,7 @@ export default function ArtistDetailPage() {
                 <td className="px-3 py-2 font-[family-name:var(--font-mono)] text-[12px]"
                   style={{ color: "var(--color-text-muted)", borderBottom: "1px solid var(--border-subtle)" }}>{t.album}</td>
                 <td className="px-3 py-2 font-[family-name:var(--font-terminal)] text-[10px] uppercase"
-                  style={{ color: "var(--color-text-muted)", borderBottom: "1px solid var(--border-subtle)" }}>{t.stage_id}</td>
+                  style={{ color: "var(--color-text-muted)", borderBottom: "1px solid var(--border-subtle)" }}>{(t.stage_ids ?? []).join(", ")}</td>
                 <td className="px-3 py-2 font-[family-name:var(--font-terminal)] text-[10px]"
                   style={{ color: "var(--color-text-muted)", borderBottom: "1px solid var(--border-subtle)" }}>{t.genre}</td>
                 <td className="px-3 py-2 font-[family-name:var(--font-terminal)] text-[10px]"
