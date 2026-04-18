@@ -42,11 +42,14 @@
   --border-glow: rgba(0, 255, 200, 0.15);
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/*
+ * Tailwind 4 already resets margin/padding/box-sizing on *, ::before, ::after
+ * inside @layer base. Re-declaring the universal reset at the top level (no
+ * layer) gave the unlayered rule higher cascade priority than every
+ * Tailwind utility — so ml-[220px], mt-4, etc. on the providers' main content
+ * wrapper quietly no-op'd and the left column rendered behind the sidebar.
+ * Fixed 2026-04-19.
+ */
 
 html {
   cursor: crosshair;
