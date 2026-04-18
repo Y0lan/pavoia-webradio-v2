@@ -794,13 +794,18 @@ def process_playlist(playlist):
     # belongs to a track Plex no longer has in this playlist; remove it so
     # the Go disk importer's soft-delete logic converges on playlist removals.
     #
-    # `plex_returned_songs` tracks whether we successfully fetched the playlist
-    # items. If Plex returned an empty (but valid) playlist, we still need to
-    # sweep — removing every track from a playlist is a legitimate state change,
-    # not an upstream failure. The safety guard is ONLY against the case where
-    # plex.items() never ran / raised before keep_basenames got populated.
-    plex_returned_songs = len(songs) > 0 or 'failed' not in results or results['failed'] == 0
-    swept_audio, swept_json = _sweep_stale(dest_folder, keep_basenames, plex_returned_songs)
+    # `sweep_authorized` is the "we know what SHOULD be on disk" signal:
+    #   - Plex returned 0 songs AND nothing failed → legitimately empty, sweep OK
+    #   - Plex returned N songs AND at least some made it into keep_basenames →
+    #     partial success is still a valid diff baseline, sweep OK
+    #   - Plex returned N songs AND ALL failed (keep_basenames empty) → upstream
+    #     broke per-track; don't sweep, risk wiping the whole folder
+    total_songs = len(songs)
+    if total_songs == 0:
+        sweep_authorized = True  # legit-empty playlist
+    else:
+        sweep_authorized = len(keep_basenames) > 0  # at least partial success
+    swept_audio, swept_json = _sweep_stale(dest_folder, keep_basenames, sweep_authorized)
     if swept_audio or swept_json:
         print(f"  Stale cleanup: removed {swept_audio} audio + {swept_json} sidecar file(s)")
 
@@ -819,18 +824,18 @@ def process_playlist(playlist):
     return results
 
 
-def _sweep_stale(folder, keep_basenames, plex_succeeded=True):
+def _sweep_stale(folder, keep_basenames, authorized=True):
     """Remove audio + sidecar files from `folder` that aren't in keep_basenames.
 
     Only touches *.mp3, *.flac, *.opus, *.wav, *.m4a, *.aac, *.ogg plus matching
     .json sidecars. Returns (audio_removed, sidecar_removed).
 
-    Safety guard: if `plex_succeeded` is False, refuse to sweep regardless of
-    keep_basenames — an upstream failure that produced an empty set shouldn't
-    nuke the whole folder. A legit-empty playlist (plex_succeeded=True,
-    keep_basenames=empty) DOES sweep correctly.
+    Safety guard: if `authorized` is False, refuse to sweep regardless of
+    keep_basenames — the caller's diff baseline isn't trustworthy (e.g. Plex
+    returned N songs but every per-track processing call failed). A legit-empty
+    playlist (authorized=True, keep_basenames=empty) DOES sweep correctly.
     """
-    if not plex_succeeded:
+    if not authorized:
         return (0, 0)
     audio_exts = ('.mp3', '.flac', '.opus', '.wav', '.m4a', '.aac', '.ogg')
     removed_audio = 0

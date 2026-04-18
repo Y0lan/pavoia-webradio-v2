@@ -2,12 +2,14 @@ package disk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,6 +17,11 @@ import (
 
 	"github.com/Y0lan/pavoia-webradio-v2/apps/bridge/config"
 )
+
+// ErrPlaylistAborted is returned by SyncOnce when a playlist-level failure
+// forced the whole run to abort. Callers (Start, admin force-sync) can
+// distinguish this from "manifest not found" or DB connection errors.
+var ErrPlaylistAborted = errors.New("disk sync aborted: playlist failed")
 
 // Importer reads the Python sync's on-disk artifacts and upserts them into
 // Postgres. One instance per bridge process; SyncOnce is safe to call
@@ -32,18 +39,31 @@ type Importer struct {
 	// the same generation. Takes the place of an advisory lock — in-process
 	// single-writer, cross-process exclusion is handled on the Python side
 	// via .sync.lock.
-	mu              sync.Mutex
-	lastGeneration  string
-	lastSuccessAt   time.Time // zero until the first clean run; /health freshness probe
+	mu             sync.Mutex
+	lastGeneration string
+
+	// lastSuccessAtNanos is read from /health under its own 3s deadline, so it
+	// MUST NOT share a mutex with SyncOnce (which can run for multiple seconds
+	// on a cold cache). atomic.Int64 of UnixNano lets readers bypass the mutex
+	// entirely while still getting a coherent view.
+	lastSuccessAtNanos atomic.Int64
 }
 
-// LastSuccess returns the timestamp of the most recent fully-successful
-// SyncOnce run, or the zero value if none has completed. Safe to call
-// concurrently. Used by the /health handler's freshness probe.
+// LastSuccess returns the timestamp of the most recent SyncOnce that either
+// (a) processed a new generation cleanly or (b) short-circuited because the
+// manifest was unchanged. Both states mean "we verified the disk artifacts
+// are readable and consistent with what we already have", which is what
+// /health cares about — a manifest that stops changing is a Python-side
+// freshness concern, not a Go-side liveness concern.
+//
+// Returns zero if the importer hasn't completed a SyncOnce yet. Safe to call
+// concurrently without blocking on the SyncOnce mutex.
 func (im *Importer) LastSuccess() time.Time {
-	im.mu.Lock()
-	defer im.mu.Unlock()
-	return im.lastSuccessAt
+	n := im.lastSuccessAtNanos.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n).UTC()
 }
 
 // NewImporter constructs the importer. webradioDir is the root where Python
@@ -110,6 +130,11 @@ func (im *Importer) SyncOnce(ctx context.Context) (*SyncResult, error) {
 	result.GenerationID = manifest.GenerationID
 
 	if manifest.GenerationID == im.lastGeneration {
+		// Manifest verified + generation matches prior run → not just "skipped"
+		// but "re-verified cleanly." Bump lastSuccessAt so /health doesn't flip
+		// to "stale" during long idle windows between Python syncs (cron every
+		// 6h, importer polls every 2 min → 180 expected skips between real work).
+		im.lastSuccessAtNanos.Store(time.Now().UnixNano())
 		result.Skipped = true
 		return result, nil
 	}
@@ -138,10 +163,11 @@ func (im *Importer) SyncOnce(ctx context.Context) (*SyncResult, error) {
 				// Abort the whole sync cycle on any playlist-level failure. If we
 				// continued with partial currentPaths, softDeleteOrphans would
 				// wrongly mark valid tracks in the failed playlist as deleted.
-				// Logging the generation skip so the next tick retries cleanly.
+				// Return a sentinel error so Start()'s failure log fires — silent
+				// (result, nil) returns previously swallowed the abort signal.
 				result.Errors = append(result.Errors, fmt.Sprintf("playlist %q: %v", pl, err))
 				slog.Warn("disk sync: playlist failed, aborting run", "playlist", pl, "error", err)
-				return result, nil
+				return result, fmt.Errorf("%w: %s: %v", ErrPlaylistAborted, pl, err)
 			}
 			for _, p := range tracks {
 				currentPaths[p] = struct{}{}
@@ -194,7 +220,7 @@ func (im *Importer) SyncOnce(ctx context.Context) (*SyncResult, error) {
 	// permanently skip a generation's worth of changes.
 	if len(result.Errors) == 0 {
 		im.lastGeneration = manifest.GenerationID
-		im.lastSuccessAt = time.Now().UTC()
+		im.lastSuccessAtNanos.Store(time.Now().UnixNano())
 	}
 
 	slog.Info("disk sync: complete",
