@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -49,32 +50,40 @@ func (h *SearchHandlers) HandleSearch(w http.ResponseWriter, r *http.Request) {
 			ORDER BY lt.title
 			LIMIT $2
 		`, pattern, limit)
-		if err == nil {
-			type trackResult struct {
-				ID       int64    `json:"id"`
-				Title    string   `json:"title"`
-				Artist   string   `json:"artist"`
-				Album    string   `json:"album"`
-				StageIDs []string `json:"stage_ids"`
-				Genre    string   `json:"genre"`
-			}
-			tracks := make([]trackResult, 0)
-			for rows.Next() {
-				var t trackResult
-				rows.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.StageIDs, &t.Genre)
-				if t.StageIDs == nil {
-					t.StageIDs = []string{}
-				}
-				tracks = append(tracks, t)
-			}
-			if err := rows.Err(); err != nil {
+		if err != nil {
+			slog.Warn("search tracks: query failed", "error", err)
+			WriteError(w, http.StatusInternalServerError, "query failed")
+			return
+		}
+		type trackResult struct {
+			ID       int64    `json:"id"`
+			Title    string   `json:"title"`
+			Artist   string   `json:"artist"`
+			Album    string   `json:"album"`
+			StageIDs []string `json:"stage_ids"`
+			Genre    string   `json:"genre"`
+		}
+		tracks := make([]trackResult, 0)
+		for rows.Next() {
+			var t trackResult
+			if err := rows.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.StageIDs, &t.Genre); err != nil {
 				rows.Close()
-				WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+				slog.Warn("search tracks: scan failed", "error", err)
+				WriteError(w, http.StatusInternalServerError, "scan failed")
 				return
 			}
-			rows.Close()
-			result["tracks"] = tracks
+			if t.StageIDs == nil {
+				t.StageIDs = []string{}
+			}
+			tracks = append(tracks, t)
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+			return
+		}
+		rows.Close()
+		result["tracks"] = tracks
 	}
 
 	// Search artists
@@ -86,26 +95,33 @@ func (h *SearchHandlers) HandleSearch(w http.ResponseWriter, r *http.Request) {
 			ORDER BY name
 			LIMIT $2
 		`, pattern, limit)
-		if err == nil {
-			defer rows.Close()
-			type artistResult struct {
-				ID       int64   `json:"id"`
-				Name     string  `json:"name"`
-				Country  *string `json:"country"`
-				ImageURL *string `json:"image_url"`
-			}
-			artists := make([]artistResult, 0)
-			for rows.Next() {
-				var a artistResult
-				rows.Scan(&a.ID, &a.Name, &a.Country, &a.ImageURL)
-				artists = append(artists, a)
-			}
-			if err := rows.Err(); err != nil {
-				WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+		if err != nil {
+			slog.Warn("search artists: query failed", "error", err)
+			WriteError(w, http.StatusInternalServerError, "query failed")
+			return
+		}
+		defer rows.Close()
+		type artistResult struct {
+			ID       int64   `json:"id"`
+			Name     string  `json:"name"`
+			Country  *string `json:"country"`
+			ImageURL *string `json:"image_url"`
+		}
+		artists := make([]artistResult, 0)
+		for rows.Next() {
+			var a artistResult
+			if err := rows.Scan(&a.ID, &a.Name, &a.Country, &a.ImageURL); err != nil {
+				slog.Warn("search artists: scan failed", "error", err)
+				WriteError(w, http.StatusInternalServerError, "scan failed")
 				return
 			}
-			result["artists"] = artists
+			artists = append(artists, a)
 		}
+		if err := rows.Err(); err != nil {
+			WriteError(w, http.StatusInternalServerError, "rows iteration failed")
+			return
+		}
+		result["artists"] = artists
 	}
 
 	result["query"] = q

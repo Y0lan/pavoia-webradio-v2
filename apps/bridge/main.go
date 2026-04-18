@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -172,21 +173,7 @@ func main() {
 			"meilisearch": "not_connected",
 			"plex":        plexStatus,
 		}
-		overall := overallHealth(checks)
-
-		health := map[string]any{
-			"status": overall,
-			"time":   time.Now().UTC().Format(time.RFC3339),
-			"stages": len(visibleStages),
-			"checks": checks,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if overall != "ok" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-		if err := json.NewEncoder(w).Encode(health); err != nil {
-			slog.Debug("health response write failed", "error", err)
-		}
+		writeHealthResponse(w, checks, len(visibleStages))
 	})
 
 	// Stages list with now-playing
@@ -340,7 +327,9 @@ func parseDurationSec(s string) any {
 	if err != nil || d < 1 {
 		return nil
 	}
-	return int(d)
+	// Round-to-nearest instead of truncation so SUM(duration_sec) aggregates
+	// aren't systematically biased low on every fractional duration.
+	return int(math.Round(d))
 }
 
 // canonicalFilePath turns MPD's relative file (e.g. "00_❤️ Tracks/01 - Cafius - Vertigo.mp3")
@@ -374,6 +363,28 @@ func stripNNPrefix(s string) string {
 		return s
 	}
 	return s[3:]
+}
+
+// writeHealthResponse is the I/O-free half of the /health handler, extracted so
+// httptest can exercise status code + body shape without spinning a DB/MPD/Plex.
+// Status code rule: 503 only for "down" (critical failure — bridge can't serve).
+// 200 for "ok" and "degraded" so a watchdog doesn't restart the bridge when the
+// thing that's broken is a non-critical dependency (Plex blip, partial MPD).
+func writeHealthResponse(w http.ResponseWriter, checks map[string]string, stageCount int) {
+	overall := overallHealth(checks)
+	health := map[string]any{
+		"status": overall,
+		"time":   time.Now().UTC().Format(time.RFC3339),
+		"stages": stageCount,
+		"checks": checks,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if overall == "down" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	if err := json.NewEncoder(w).Encode(health); err != nil {
+		slog.Debug("health response write failed", "error", err)
+	}
 }
 
 // overallHealth collapses the per-check map into a single verdict.
