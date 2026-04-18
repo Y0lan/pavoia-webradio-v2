@@ -123,13 +123,16 @@ func (p *Pool) Close() {
 	p.wg.Wait() // Wait for all watcher goroutines to exit
 
 	for _, c := range p.conns {
+		// Detach the client under the mutex, then close it without the mutex held —
+		// Close on a TCP connection that's stuck in Read can itself block indefinitely.
 		c.mu.Lock()
-		if c.client != nil {
-			c.client.Close()
-			c.client = nil
-		}
+		client := c.client
+		c.client = nil
 		c.alive = false
 		c.mu.Unlock()
+		if client != nil {
+			_ = client.Close()
+		}
 	}
 }
 
@@ -147,50 +150,66 @@ func (p *Pool) IsAlive(stageID string) bool {
 }
 
 func (c *Conn) connect(addr string) error {
+	// Detach any existing client under the mutex, close it outside.
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.client != nil {
-		c.client.Close()
+	oldClient := c.client
+	c.client = nil
+	c.alive = false
+	c.mu.Unlock()
+	if oldClient != nil {
+		_ = oldClient.Close()
 	}
 
 	// gompd.Dial will fail naturally if the port is unreachable.
-	// No need for a separate test connection (removes TOCTOU race).
 	client, err := gompd.Dial("tcp", addr)
 	if err != nil {
-		c.alive = false
-		c.client = nil
 		return err
 	}
+
+	c.mu.Lock()
 	c.client = client
 	c.alive = true
+	c.mu.Unlock()
 	return nil
 }
 
 func (c *Conn) nowPlaying() NowPlaying {
+	// Snapshot under the mutex, then release it before any blocking network I/O.
+	// Holding c.mu across Status()/Ping()/CurrentSong() froze entire stages for weeks
+	// in 2026-03 when a TCP Read never returned (silent NAT drop on shared hosting).
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	client := c.client
+	alive := c.alive
+	stageID := c.Stage.ID
+	c.mu.Unlock()
 
-	np := NowPlaying{StageID: c.Stage.ID}
+	np := NowPlaying{StageID: stageID}
 
-	if c.client == nil || !c.alive {
+	if client == nil || !alive {
 		np.Status = "offline"
 		np.Error = "not connected"
 		return np
 	}
 
-	status, err := c.client.Status()
+	status, err := client.Status()
 	if err != nil {
-		// Try a ping before declaring dead — could be a transient error
-		if pingErr := c.client.Ping(); pingErr != nil {
+		// Try a ping before declaring dead — could be a transient error.
+		if pingErr := client.Ping(); pingErr != nil {
 			np.Status = "error"
 			np.Error = err.Error()
-			c.alive = false
-			c.client.Close()
-			c.client = nil // Clear client so next call returns "offline" immediately
+			// Compare-and-swap: only null out c.client if it's still the same one we read.
+			// A parallel reconnect() may have already replaced it with a healthy connection.
+			c.mu.Lock()
+			if c.client == client {
+				c.alive = false
+				c.client = nil
+			}
+			c.mu.Unlock()
+			// Close outside the mutex — Close on a hung TCP conn can itself block.
+			_ = client.Close()
 			return np
 		}
-		// Ping succeeded — transient error, don't kill the connection
+		// Ping succeeded — transient, don't kill the connection.
 		np.Status = "error"
 		np.Error = err.Error()
 		return np
@@ -200,7 +219,7 @@ func (c *Conn) nowPlaying() NowPlaying {
 	np.Elapsed = status["elapsed"]
 	np.Duration = status["duration"]
 
-	song, err := c.client.CurrentSong()
+	song, err := client.CurrentSong()
 	if err != nil {
 		np.Error = err.Error()
 		return np
@@ -264,18 +283,27 @@ func (p *Pool) watchLoop(ctx context.Context, conn *Conn, host string) {
 	}
 }
 
-// drainWatcher reads events from a watcher until error or context cancellation.
-// This reuses a single connection for multiple events instead of creating a new one per event.
+// drainWatcher reads events from a watcher until error, context cancellation, or
+// the watchdog fires. The watchdog guards against gompd's internal read goroutine
+// blocking forever on a silently-dead TCP connection (no FIN, no RST, no error) —
+// which is what froze every stage for weeks in 2026-03.
 func (p *Pool) drainWatcher(ctx context.Context, watcher *gompd.Watcher, conn *Conn, lastSong *string) {
+	// 10 min is comfortably above any realistic track length. False positives only
+	// cost one watcher recreate + reconnect (a few seconds on healthy infra).
+	const watcherIdleTimeout = 10 * time.Minute
+
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-time.After(watcherIdleTimeout):
+			slog.Warn("mpd watcher idle timeout, resetting", "stage", conn.Stage.ID, "after", watcherIdleTimeout)
 			return
 		case _, ok := <-watcher.Event:
 			if !ok {
 				return // channel closed
 			}
-			// Track changed — get new state and notify
+			// Track changed — get new state and notify.
 			np := conn.nowPlaying()
 			songKey := np.Song["file"]
 			if songKey != *lastSong && songKey != "" {

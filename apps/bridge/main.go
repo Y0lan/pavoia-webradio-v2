@@ -134,7 +134,7 @@ func main() {
 		enrichWorker.Start(ctx)
 		slog.Info("enrichment worker started", "interval", "30m")
 	} else {
-		slog.Info("enrichment not configured — skipping (need LASTFM_KEY + database)")
+		slog.Info("enrichment not configured — skipping (need LASTFM_API_KEY + database)")
 	}
 
 	// Cache visible stages (config never changes at runtime)
