@@ -231,28 +231,6 @@ kill_old_web_by_pidfile() {
 }
 kill_old_web_by_pidfile
 
-# --- Migration fallback (to be removed once every live install writes a
-# pidfile): the path-based pkill catches servers that were launched
-# before we started writing web.pid. The /proc/cwd sweeper catches the
-# case where Next had already rewritten its title so pkill -f missed it.
-# Both should become no-ops as soon as every live server was started
-# from this branch.
-pkill -TERM -f -- "\$WEB_SERVER" 2>/dev/null || true
-sleep 2
-pkill -KILL -f -- "\$WEB_SERVER" 2>/dev/null || true
-for pid in \$(pgrep -f "next-server" 2>/dev/null || true); do
-    PID_CWD=\$(readlink "/proc/\$pid/cwd" 2>/dev/null || echo "")
-    [ -z "\$PID_CWD" ] && continue
-    case "\$PID_CWD" in
-        */gaende-radio|*/gaende-radio/*)
-            echo "  [fallback] killing stale next-server \$pid (cwd=\$PID_CWD)"
-            kill -TERM "\$pid" 2>/dev/null || true
-            sleep 2
-            kill -KILL "\$pid" 2>/dev/null || true
-            ;;
-    esac
-done
-
 PORT="${WEB_PORT}" HOSTNAME=0.0.0.0 nohup "\$MISE_NODE" "\$WEB_SERVER" > ~/gaende-radio/web.log 2>&1 &
 WEB_PID=\$!
 echo "\$WEB_PID" > "\$WEB_PID_FILE"
