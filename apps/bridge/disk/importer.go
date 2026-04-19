@@ -371,11 +371,13 @@ func (im *Importer) syncPlaylistFolder(
 		_, err = tx.Exec(ctx, `
 			INSERT INTO library_tracks (
 				file_path, title, artist, album, genre, year, duration_sec,
-				file_format, artist_id, plex_rating_key, plex_added_at, added_at, deleted_at
+				file_format, artist_id, plex_rating_key, plex_added_at, added_at,
+				bpm, camelot_key, deleted_at
 			)
 			-- $11 is the one "when was this added" timestamp; we store it as both
 			-- plex_added_at (provenance) and added_at (what /digging groups by).
-			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7, $8, $9, $10, $11, $11, NULL)
+			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7, $8, $9, $10, $11, $11,
+			        $12, NULLIF($13, ''), NULL)
 			ON CONFLICT (file_path) DO UPDATE SET
 				title           = EXCLUDED.title,
 				artist          = EXCLUDED.artist,
@@ -388,6 +390,8 @@ func (im *Importer) syncPlaylistFolder(
 				plex_rating_key = EXCLUDED.plex_rating_key,
 				-- added_at stays on the original value so /digging history is stable;
 				-- re-appearing a deleted track just clears deleted_at, not added_at.
+				bpm             = COALESCE(EXCLUDED.bpm, library_tracks.bpm),
+				camelot_key     = COALESCE(EXCLUDED.camelot_key, library_tracks.camelot_key),
 				deleted_at      = NULL
 		`,
 			filePath,
@@ -401,6 +405,8 @@ func (im *Importer) syncPlaylistFolder(
 			artistID,
 			RatingKeyString(sc.Metadata.PlexRatingKey),
 			addedAt,
+			sc.Track.BPM,
+			sc.Track.CamelotKey,
 		)
 		if err != nil {
 			// A library_tracks write failing is a real DB problem; abort the

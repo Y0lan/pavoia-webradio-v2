@@ -17,6 +17,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import subprocess
@@ -258,7 +259,13 @@ def extract_track_metadata(track, playlist_name):
                 "genres": [],
                 "moods": [],
                 "track_number": getattr(track, 'index', None),
-                "disc_number": getattr(track, 'parentIndex', None)
+                "disc_number": getattr(track, 'parentIndex', None),
+                # BPM + Camelot key come from the audio file's ID3 tags
+                # (filled in save_metadata_json); keep them in the schema so
+                # sidecars written before tag extraction still parse cleanly
+                # in the Go importer's strict JSON decoder.
+                "bpm": None,
+                "camelot_key": "",
             },
             "album": {
                 "cover_path": None,
@@ -442,7 +449,34 @@ def save_metadata_json(metadata, json_path, audio_file_path):
             file_stat = os.stat(audio_file_path)
             creation_time = file_stat.st_mtime
             metadata['metadata']['added_to_webradio'] = _utc_ts_str(creation_time)
-        
+
+        # Read ID3 tags from the audio file and fold them into the sidecar.
+        # Plex doesn't expose BPM or Camelot key (Mixed-In-Key writes those
+        # straight to the file's TBPM / INITIALKEY frames), so without this
+        # step library_tracks.bpm / .camelot_key stay NULL forever and the
+        # /stats BPM + Keys charts render empty. Year + genre from ID3 only
+        # fill in when Plex didn't supply its own (Plex wins when it has data
+        # so we don't flip a user-curated genre).
+        if audio_file_path and os.path.exists(audio_file_path):
+            try:
+                from tag_extract import read_audio_tags, mutagen_available
+                if mutagen_available():
+                    tags = read_audio_tags(audio_file_path)
+                    if tags.get('bpm') is not None:
+                        metadata['track']['bpm'] = tags['bpm']
+                    if tags.get('camelot_key'):
+                        metadata['track']['camelot_key'] = tags['camelot_key']
+                    if tags.get('year') is not None and not metadata['track'].get('year'):
+                        metadata['track']['year'] = tags['year']
+                    # genres is a list; prepend ID3 genre if Plex gave us nothing.
+                    if tags.get('genre'):
+                        existing = metadata['track'].get('genres') or []
+                        if not existing:
+                            metadata['track']['genres'] = [tags['genre']]
+            except Exception as _tag_err:
+                # Never fail a sidecar write because of a bad ID3. Log and move on.
+                print(f"tag read failed for {audio_file_path}: {_tag_err}")
+
         # Update the updated_at timestamp to current time
         metadata['metadata']['updated_at'] = _utc_now_str()
 

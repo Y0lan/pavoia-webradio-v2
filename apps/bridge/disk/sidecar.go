@@ -22,6 +22,13 @@ type Sidecar struct {
 		Genres      []string `json:"genres"`
 		TrackNumber *int     `json:"track_number"`
 		DiscNumber  *int     `json:"disc_number"`
+		// BPM + CamelotKey come from the audio file's ID3 tags (TBPM + TKEY /
+		// INITIALKEY), extracted by the Python sync or backfill pass. Both are
+		// nullable — tracks without Mixed-In-Key analysis keep them as nil/""
+		// rather than zero-value-poisoning the stats aggregates. See
+		// scripts/plex-sync/tag_extract.py for the extraction + normalization.
+		BPM         *int   `json:"bpm"`
+		CamelotKey  string `json:"camelot_key"`
 	} `json:"track"`
 	Artist struct {
 		Name       string `json:"name"`
