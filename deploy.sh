@@ -180,45 +180,83 @@ echo "  Bridge PID: \$!"
 # pkill pattern never hit the newly-launched process.
 MISE_NODE="\$HOME/.local/share/mise/installs/node/22.22.2/bin/node"
 WEB_SERVER="\$HOME/gaende-radio/web/standalone/server.js"
-# pkill is path-qualified to OUR install root — no chance of sweeping a
-# sibling Next app on the same account. A pre-standalone leftover
-# (next-server process from before this deploy format) must be killed
-# manually once: \`pkill -f next-server\`; this script deliberately does
-# not sweep by process-title to avoid collateral kills.
+WEB_PID_FILE="\$HOME/gaende-radio/web.pid"
+
+# --- Steady-state kill path: PID file with validation ---
+#
+# Previous deploys have been burned by a grab-bag of partial fixes
+# (cmdline pkill, ss-based port scan, /proc/cwd pattern match) because
+# Next rewrites process.title to "next-server (vX.Y.Z)" a few minutes
+# after boot and shared hosting denies ss -tlnp to non-root users. The
+# clean design — codex-reviewed 2026-04-19 — is: we own the PID because
+# WE launched it, so write it to disk and read it back next time.
+# Validate before killing so PID reuse doesn't bite us: the same PID
+# must (a) still exist, (b) still belong to a process whose cwd is under
+# our install tree. Only then TERM; only KILL if that same PID still
+# validates after a short wait.
+kill_old_web_by_pidfile() {
+    [ -f "\$WEB_PID_FILE" ] || return 0
+    local old_pid
+    old_pid=\$(cat "\$WEB_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+    [ -n "\$old_pid" ] || return 0
+    [ -e "/proc/\$old_pid" ] || { echo "  pidfile PID \$old_pid gone; clearing"; rm -f "\$WEB_PID_FILE"; return 0; }
+    local cwd
+    cwd=\$(readlink "/proc/\$old_pid/cwd" 2>/dev/null || echo "")
+    case "\$cwd" in
+        */gaende-radio|*/gaende-radio/*) ;;
+        *) echo "  pidfile PID \$old_pid has unrelated cwd=\$cwd; refusing to kill"; return 0 ;;
+    esac
+    echo "  stopping previous web (PID \$old_pid, cwd=\$cwd)"
+    kill -TERM "\$old_pid" 2>/dev/null || true
+    local i
+    for i in 1 2 3 4 5; do
+        [ -e "/proc/\$old_pid" ] || break
+        sleep 1
+    done
+    if [ -e "/proc/\$old_pid" ]; then
+        # Re-check cwd before KILL in case this PID was reused during the wait.
+        local cwd2
+        cwd2=\$(readlink "/proc/\$old_pid/cwd" 2>/dev/null || echo "")
+        case "\$cwd2" in
+            */gaende-radio|*/gaende-radio/*)
+                echo "  escalating to KILL on PID \$old_pid"
+                kill -KILL "\$old_pid" 2>/dev/null || true
+                ;;
+            *)
+                echo "  PID \$old_pid no longer owned by us (cwd=\$cwd2); leaving alone"
+                ;;
+        esac
+    fi
+    rm -f "\$WEB_PID_FILE"
+}
+kill_old_web_by_pidfile
+
+# --- Migration fallback (to be removed once every live install writes a
+# pidfile): the path-based pkill catches servers that were launched
+# before we started writing web.pid. The /proc/cwd sweeper catches the
+# case where Next had already rewritten its title so pkill -f missed it.
+# Both should become no-ops as soon as every live server was started
+# from this branch.
 pkill -TERM -f -- "\$WEB_SERVER" 2>/dev/null || true
 sleep 2
 pkill -KILL -f -- "\$WEB_SERVER" 2>/dev/null || true
-
-# Belt-and-suspenders: after Next.js has been running a while, /proc/PID/cmdline
-# rewrites to "next-server (v16.2.1)" (a dev flourish Next applies via
-# process.title). That renders the path-based pkill above a no-op and the
-# stale server keeps holding :13000; the new deploy silently fails with
-# EADDRINUSE and the old server keeps serving pre-deploy HTML that references
-# chunks that no longer exist on disk. Shared hosting blocks ss -tlnp for
-# non-root users, so we can't scope by listening port. Instead: find every
-# next-server matching our cwd (via /proc/PID/cwd symlink), which scopes
-# tightly to this install and can't sweep another Next app on the same
-# account that lives in a different directory.
-# On Whatbox, \$HOME is a symlink to /mnt/mpathj/USER — so /proc/PID/cwd
-# resolves to the absolute mountpath, not \$HOME/gaende-radio. Instead of
-# chasing the canonicalization dance, just require the cwd to end with our
-# install's distinctive suffix ("gaende-radio" somewhere in the path + a
-# "web" segment). Tight enough to avoid sweeping an unrelated Next app on
-# this account, loose enough to survive the mountpoint alias.
 for pid in \$(pgrep -f "next-server" 2>/dev/null || true); do
     PID_CWD=\$(readlink "/proc/\$pid/cwd" 2>/dev/null || echo "")
-    if [ -z "\$PID_CWD" ]; then continue; fi
+    [ -z "\$PID_CWD" ] && continue
     case "\$PID_CWD" in
         */gaende-radio|*/gaende-radio/*)
-            echo "  killing stale next-server \$pid (cwd=\$PID_CWD)"
+            echo "  [fallback] killing stale next-server \$pid (cwd=\$PID_CWD)"
             kill -TERM "\$pid" 2>/dev/null || true
             sleep 2
             kill -KILL "\$pid" 2>/dev/null || true
             ;;
     esac
 done
+
 PORT="${WEB_PORT}" HOSTNAME=0.0.0.0 nohup "\$MISE_NODE" "\$WEB_SERVER" > ~/gaende-radio/web.log 2>&1 &
-echo "  Web PID: \$!"
+WEB_PID=\$!
+echo "\$WEB_PID" > "\$WEB_PID_FILE"
+echo "  Web PID: \$WEB_PID (written to \$WEB_PID_FILE)"
 REMOTE
 
 # 6. Health gate — fail the deploy if bridge or web isn't responding.
