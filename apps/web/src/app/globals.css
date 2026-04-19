@@ -104,3 +104,28 @@ body::after {
 /* Animations */
 @keyframes scan { 0% { top: -2px; } 100% { top: 100%; } }
 @keyframes flicker { 0%, 97%, 100% { opacity: 1; } 98% { opacity: 0.4; } 99% { opacity: 0.8; } }
+
+/* Stage LED breathing — subtle, not disco. Long cycle so 9 of these on
+ * one page don't turn the home screen into a Times Square sign. */
+@keyframes ledPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(0.82); }
+}
+
+/* Dual-layer glitch used by the About hero. ::before rides in accent cyan
+ * clipped to the top third; ::after rides in signal magenta clipped to the
+ * bottom third. The jitters offset x/y and the clip windows move so it
+ * reads as a VHS tearing, not a uniform blur. Long interval between bursts
+ * per design system rule (no constant glitching). */
+@keyframes glitchTop {
+  0%, 93%, 100% { transform: translate(0, 0); clip-path: polygon(0 0, 100% 0, 100% 33%, 0 33%); }
+  94% { transform: translate(-3px, 1px);  clip-path: polygon(0 10%, 100% 0, 100% 40%, 0 28%); }
+  95% { transform: translate(4px, -2px);  clip-path: polygon(0 4%,  100% 8%, 100% 35%, 0 30%); }
+  96% { transform: translate(-1px, 2px);  clip-path: polygon(0 0,   100% 0, 100% 33%, 0 33%); }
+}
+@keyframes glitchBottom {
+  0%, 93%, 100% { transform: translate(0, 0); clip-path: polygon(0 66%, 100% 66%, 100% 100%, 0 100%); }
+  94% { transform: translate(3px, -1px);  clip-path: polygon(0 70%, 100% 60%, 100% 100%, 0 95%); }
+  95% { transform: translate(-4px, 2px);  clip-path: polygon(0 65%, 100% 72%, 100% 100%, 0 100%); }
+  96% { transform: translate(1px, -2px);  clip-path: polygon(0 66%, 100% 66%, 100% 100%, 0 100%); }
+}

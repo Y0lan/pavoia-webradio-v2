@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { BRIDGE_URL, STAGES } from "@/lib/stages";
+import { CamelotWheel } from "@/components/camelot-wheel";
 
 function SectionLabel({ label }: { label: string }) {
   return (
@@ -169,19 +170,16 @@ export default function StatsPage() {
         </div>
       </div>
 
-      {/* Key Distribution */}
+      {/* Key Distribution — radial Camelot wheel. Outer ring = B/major,
+          inner ring = A/minor; fill intensity tracks track count per slot
+          so a DJ can spot which zones of the harmonic grid are overstocked
+          (loads of 8A, thin on 12B) at one glance. */}
       <div className="clip-card p-5 mt-4" style={{ background: "var(--color-bg-card)", border: "1px solid var(--border-subtle)" }}>
         <h3 className="font-[family-name:var(--font-terminal)] text-[10px] tracking-[0.1em] uppercase mb-4"
           style={{ color: "var(--color-text-muted)" }}>CAMELOT KEY WHEEL</h3>
         {keys && keys.length > 0 ? (
-          <div className="flex flex-wrap gap-2">
-            {keys.map((k: any) => (
-              <div key={k.key} className="text-center px-3 py-2"
-                style={{ background: "var(--color-bg-elevated)", border: "1px solid var(--border-subtle)" }}>
-                <div className="font-[family-name:var(--font-display)] text-[16px] font-bold" style={{ color: "var(--color-accent)" }}>{k.key}</div>
-                <div className="font-[family-name:var(--font-terminal)] text-[9px]" style={{ color: "var(--color-text-muted)" }}>{k.count}</div>
-              </div>
-            ))}
+          <div className="flex justify-center">
+            <CamelotWheel data={keys} size={420} />
           </div>
         ) : (
           <EmptyChart hint="Keys from Mixed-In-Key analysis" />

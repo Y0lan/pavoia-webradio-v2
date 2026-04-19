@@ -9,12 +9,39 @@ export default function AboutPage() {
         WebkitMaskImage: "radial-gradient(ellipse at center, rgba(0,0,0,0.4) 0%, transparent 70%)",
       }} />
 
+      {/* Two floating orbs — one accent cyan, one signal magenta. Heavy blur,
+          slow drift, low opacity so they read as depth rather than decoration. */}
+      <div
+        className="absolute -top-24 -left-24 w-[420px] h-[420px] pointer-events-none opacity-30"
+        style={{
+          background: "radial-gradient(circle, var(--color-accent) 0%, transparent 60%)",
+          filter: "blur(80px)",
+        }}
+      />
+      <div
+        className="absolute bottom-0 right-0 w-[360px] h-[360px] pointer-events-none opacity-20"
+        style={{
+          background: "radial-gradient(circle, #ff0066 0%, transparent 60%)",
+          filter: "blur(90px)",
+        }}
+      />
+
       <div className="relative z-10 flex flex-col items-center pt-20 px-6">
         {/* Section label */}
         <div className="flex items-center gap-2 mb-12 w-full max-w-2xl">
           <span className="font-[family-name:var(--font-terminal)] text-[11px] tracking-[0.25em] uppercase"
             style={{ color: "var(--color-accent)" }}>// ABOUT</span>
           <div className="flex-1 h-px" style={{ background: "linear-gradient(90deg, var(--color-accent-dim), transparent)" }} />
+        </div>
+
+        {/* Coordinates — flickering system text above the title.
+            Real Pavoia is the Warsaw beach club (Wybrzeże Helskie 1/5, near
+            centrum Warszawy); coordinates are the approximate location. */}
+        <div
+          className="font-[family-name:var(--font-terminal)] text-[9px] tracking-[0.3em] uppercase mb-2"
+          style={{ color: "var(--color-text-muted)", animation: "flicker 4s infinite" }}
+        >
+          52.2490° N · 21.0281° E · WARSZAWA
         </div>
 
         {/* Pavoia logo */}
@@ -24,11 +51,41 @@ export default function AboutPage() {
           className="w-[120px] md:w-[260px] h-auto mb-4"
         />
 
-        {/* Title */}
-        <h1 className="font-[family-name:var(--font-display)] text-[32px] md:text-[48px] font-extrabold tracking-[0.1em] mb-2"
-          style={{ color: "var(--color-text-primary)" }}>
-          Pavoia Webradio
-        </h1>
+        {/* Title with dual-layer glitch. The real text is rendered three
+            times: a base white layer plus two absolute-positioned clones
+            (cyan top-third, magenta bottom-third) driven by the
+            glitchTop / glitchBottom keyframes. Glitch bursts fire ~every
+            6s, brief enough to read as VHS tearing and not get annoying. */}
+        <div className="relative mb-2">
+          <h1
+            className="font-[family-name:var(--font-display)] text-[32px] md:text-[56px] font-extrabold tracking-[0.08em]"
+            style={{ color: "var(--color-text-primary)" }}
+          >
+            Pavoia Webradio
+          </h1>
+          <h1
+            aria-hidden="true"
+            className="font-[family-name:var(--font-display)] text-[32px] md:text-[56px] font-extrabold tracking-[0.08em] absolute inset-0 pointer-events-none"
+            style={{
+              color: "var(--color-accent)",
+              animation: "glitchTop 6s infinite",
+              mixBlendMode: "screen",
+            }}
+          >
+            Pavoia Webradio
+          </h1>
+          <h1
+            aria-hidden="true"
+            className="font-[family-name:var(--font-display)] text-[32px] md:text-[56px] font-extrabold tracking-[0.08em] absolute inset-0 pointer-events-none"
+            style={{
+              color: "#ff0066",
+              animation: "glitchBottom 6s infinite",
+              mixBlendMode: "screen",
+            }}
+          >
+            Pavoia Webradio
+          </h1>
+        </div>
 
         {/* Subtitle */}
         <div className="font-[family-name:var(--font-terminal)] text-[11px] tracking-[0.15em] uppercase mb-12"
