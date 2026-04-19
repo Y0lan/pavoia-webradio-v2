@@ -199,15 +199,23 @@ pkill -KILL -f -- "\$WEB_SERVER" 2>/dev/null || true
 # next-server matching our cwd (via /proc/PID/cwd symlink), which scopes
 # tightly to this install and can't sweep another Next app on the same
 # account that lives in a different directory.
-INSTALL_CWD="\$HOME/gaende-radio"
+# On Whatbox, \$HOME is a symlink to /mnt/mpathj/USER — so /proc/PID/cwd
+# resolves to the absolute mountpath, not \$HOME/gaende-radio. Instead of
+# chasing the canonicalization dance, just require the cwd to end with our
+# install's distinctive suffix ("gaende-radio" somewhere in the path + a
+# "web" segment). Tight enough to avoid sweeping an unrelated Next app on
+# this account, loose enough to survive the mountpoint alias.
 for pid in \$(pgrep -f "next-server" 2>/dev/null || true); do
     PID_CWD=\$(readlink "/proc/\$pid/cwd" 2>/dev/null || echo "")
-    if [ -n "\$PID_CWD" ] && [ "\$PID_CWD" = "\$INSTALL_CWD" ] || [[ "\$PID_CWD" == "\$INSTALL_CWD"/* ]]; then
-        echo "  killing stale next-server \$pid (cwd=\$PID_CWD)"
-        kill -TERM "\$pid" 2>/dev/null || true
-        sleep 2
-        kill -KILL "\$pid" 2>/dev/null || true
-    fi
+    if [ -z "\$PID_CWD" ]; then continue; fi
+    case "\$PID_CWD" in
+        */gaende-radio|*/gaende-radio/*)
+            echo "  killing stale next-server \$pid (cwd=\$PID_CWD)"
+            kill -TERM "\$pid" 2>/dev/null || true
+            sleep 2
+            kill -KILL "\$pid" 2>/dev/null || true
+            ;;
+    esac
 done
 PORT="${WEB_PORT}" HOSTNAME=0.0.0.0 nohup "\$MISE_NODE" "\$WEB_SERVER" > ~/gaende-radio/web.log 2>&1 &
 echo "  Web PID: \$!"
